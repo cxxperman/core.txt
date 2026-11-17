@@ -1,0 +1,51 @@
+{
+  "v": 1,
+  "apps": [
+    {
+      "id": "kapsula",
+      "name": "Kapsula",
+      "tagline": "Остров для Windows: музыка, уведомления, буфер и зверёк",
+      "color": "#F08A4B",
+      "kind": "portable",
+      "repo": "cxxperman/kapsula",
+      "asset": "Kapsula.exe",
+      "exe": "Kapsula.exe",
+      "process": "Kapsula"
+    },
+    {
+      "id": "aura",
+      "name": "Aura",
+      "tagline": "Студийная обработка голоса с микрофона",
+      "color": "#4F8DF7",
+      "kind": "installer",
+      "repo": "cxxperman/aura-voice",
+      "asset": "Aura-Setup-*.exe",
+      "silent": "/S",
+      "installed": "%LOCALAPPDATA%\\Programs\\Aura\\Aura.exe",
+      "process": "Aura",
+      "sprite": ["....##......", "...####....#", "..######..##", ".###########", "##E########.", "##E########.", ".###########", "..######..##", "...####....#", "....##......"]
+    },
+    {
+      "id": "maska",
+      "name": "Maska",
+      "tagline": "Ваш облик и звонки для Discord",
+      "color": "#8A5CF6",
+      "kind": "integration",
+      "marker": "%APPDATA%\\Vencord\\dist\\kapsula.txt",
+      "via": "kapsula",
+      "hint": "Подключается в Kapsula: Настройки → Steam и Discord",
+      "sprite": ["#..........#", "##........##", "############", "###E####E###", "###E####E###", "############", ".####..####.", "..##....##.."]
+    },
+    {
+      "id": "arkada",
+      "name": "Arkada",
+      "tagline": "Игры и уведомления Steam в общем стиле",
+      "color": "#2A8FD8",
+      "kind": "integration",
+      "marker": "{steam}\\millennium\\plugins\\kapsula\\plugin.json",
+      "via": "kapsula",
+      "hint": "Подключается в Kapsula: Настройки → Steam и Discord",
+      "sprite": [".####..####.", "############", "##E######E##", "#EEE####E#E#", "##E######E##", "############", "####....####", ".##......##."]
+    }
+  ]
+}

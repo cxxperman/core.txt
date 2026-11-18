@@ -26,12 +26,12 @@ namespace DevTxt.Core
             new Scenario
             {
                 Id = "call-aura-on", Title = "В звонке Discord включать обработку голоса",
-                Hint = "Зашли в голосовой канал или приняли звонок — Aura включается. Вышли — возвращается как было",
+                Hint = "Зашли в голосовой канал или приняли звонок — aura.txt включается. Вышли — возвращается как было",
                 Needs = new string[] { "maska", "aura" }, Topic = "maska.voice", Field = "inCall", Target = "aura", Key = "power", On = true
             },
             new Scenario
             {
-                Id = "mute-aura", Title = "Микрофон выключен в Discord — заглушить и в Aura",
+                Id = "mute-aura", Title = "Микрофон выключен в Discord — заглушить и в aura.txt",
                 Hint = "Тишина во всех программах, пока вы заглушены в звонке",
                 Needs = new string[] { "maska", "aura" }, Topic = "maska.voice", Field = "mute", Target = "aura", Key = "mute", On = true
             },

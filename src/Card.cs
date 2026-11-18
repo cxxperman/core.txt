@@ -122,7 +122,7 @@ namespace DevTxt.Core
         public void Render(Action<Card> install, Action<Card> open, Func<string, Card> find, Action<Card> connect, Func<string, bool> connected)
         {
             ShowIcon();
-            Color dotColor = Tokens.Dark.Label3;
+            Color dotColor = (Ui.Light ? Tokens.Light.Label3 : Tokens.Dark.Label3);   // по теме Windows   // audit:ok — цвет выбран по теме
             string text, hint = "";
             bool busy = S.Phase != Phase.Idle;
             // Полоса: при скачивании считает, при установке и удалении — бегает
@@ -215,7 +215,7 @@ namespace DevTxt.Core
                 else if (!busy && wasBusy)
                 {
                     if (error != null) Motion.Breathe(tile, false);
-                    else { Motion.Pop(tile); Motion.Glow(Root, S.Installed ? App.Color : Tokens.Dark.Label3); }
+                    else { Motion.Pop(tile); Motion.Glow(Root, S.Installed ? App.Color : (Ui.Light ? Tokens.Light.Label3 : Tokens.Dark.Label3)); }   // audit:ok — цвет выбран по теме
                 }
                 if (error != null && error != wasError) Motion.Shake(Root);
                 else if (!busy && !wasBusy && S.Installed != wasInstalled) Motion.Pop(tile);

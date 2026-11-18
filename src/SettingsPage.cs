@@ -215,7 +215,7 @@ namespace DevTxt.Core
             if (outside > 0) home.Set("Собрать", Tokens.Palette.Brand, true, delegate { w.GatherAll(); });
             else home.Set("Открыть папку", null, true, delegate { w.OpenHome(); });
             Row("Все приложения в одной папке", outside > 0
-                ? "Не в общей папке dev.txt: " + outside + ". Перенос закроет и снова запустит эти приложения; Aura остаётся там, куда её поставил установщик"
+                ? "Не в общей папке dev.txt: " + outside + ". Перенос закроет и снова запустит эти приложения; aura.txt остаётся там, куда её поставил установщик"
                 : "Приложения dev.txt лежат вместе, в папке программ dev.txt", home.Root);
 
             Title("Обновления");

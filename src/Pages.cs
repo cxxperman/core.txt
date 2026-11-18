@@ -323,7 +323,7 @@ namespace DevTxt.Core
                 Row("Меньше движения", "Без пружин и плавных переходов во всех приложениях", new Switch(State.ReducedMotion, delegate(bool on) { w.SetTheme(null, on); }).Root);
                 Row("Запускать core.txt вместе с Windows", "Тихо, в трее: приложения сразу видят друг друга и общие настройки", new Switch(autostart, delegate(bool on) { autostart = on; }).Root);
                 if (w.DemoMode || w.OutsideCount() > (SelfUpdate.IsInstalled ? 0 : 1))
-                    Row("Собрать приложения в одну папку", "Те, что уже стоят, переедут в общую папку dev.txt и будут перезапущены. Aura остаётся там, куда её поставил установщик", new Switch(gather, delegate(bool on) { gather = on; }).Root);
+                    Row("Собрать приложения в одну папку", "Те, что уже стоят, переедут в общую папку dev.txt и будут перезапущены. aura.txt остаётся там, куда её поставил установщик", new Switch(gather, delegate(bool on) { gather = on; }).Root);
             }
             else
             {

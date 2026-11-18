@@ -195,7 +195,7 @@ namespace DevTxt.Core
 
         void RenderAll()
         {
-            foreach (var c in Cards) c.Render(Install, Open, Find);
+            foreach (var c in Cards) c.Render(Install, Open, Find, Connect, Connected);
             if (page == PSettings) settings.Render();
             else if (page == PScenarios) scenariosPage.Render();
             else if (page == PWelcome) welcome.Render();
@@ -255,7 +255,8 @@ namespace DevTxt.Core
                 object ok;
                 bool good = m.TryGetValue("ok", out ok) && ok is bool && (bool)ok;
                 string error = Json.Str(m, "error");
-                notice = good ? null : "Не получилось изменить настройку: " + (error == "offline" ? "приложение не запущено" : error == "timeout" ? "приложение не ответило" : error ?? "приложение отказало");
+                notice = good ? null : "Не получилось: " + (error == "offline" ? "приложение не запущено" : error == "timeout" ? "приложение не ответило" : error ?? "приложение отказало");
+                if (good) RefreshLocal();   // подключение могло только что появиться на диске
                 RenderAll();
             }
             else if (type == "command")
@@ -278,6 +279,15 @@ namespace DevTxt.Core
         }
 
         internal bool Connected(string app) { return connectedApps.Contains(app); }
+
+        // Подключение (Maska для Discord): его выполняет другое приложение по команде хаба, ответ придёт результатом
+        void Connect(Card c)
+        {
+            if (DemoMode || c.App.Connect == null || c.App.Via == null) return;
+            SendCommand(c.App.Via, c.App.Connect, new Dictionary<string, object>());
+            notice = null;
+            RenderAll();
+        }
 
         // Общий вид меняется здесь: accent — "#RRGGBB", "" (свой у каждого) или null (не менять)
         internal void SetTheme(string accent, bool? reduced)
@@ -340,7 +350,7 @@ namespace DevTxt.Core
             foreach (string id in ids)
             {
                 Card c = Find(id);
-                if (c != null && !c.App.IsIntegration && !c.S.Installed) Install(c);
+                if (c != null && c.App.HasExe && !c.S.Installed) Install(c);
             }
         }
 
@@ -449,7 +459,7 @@ namespace DevTxt.Core
                     c.S.Latest = found; State.Latest[app.Id] = found; State.Save();
                 }
                 Release r = c.S.Latest;
-                Action<double> progress = delegate(double p) { Dispatcher.BeginInvoke(new Action(delegate { c.S.Progress = p; if (c.S.Phase == Phase.Downloading) c.Render(Install, Open, Find); })); };
+                Action<double> progress = delegate(double p) { Dispatcher.BeginInvoke(new Action(delegate { c.S.Progress = p; if (c.S.Phase == Phase.Downloading) c.Render(Install, Open, Find, Connect, Connected); })); };
                 string file = await Task.Run(delegate { return Releases.Download(r, progress); });
                 c.S.Phase = Phase.Installing;
                 RenderAll();

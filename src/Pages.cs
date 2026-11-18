@@ -152,7 +152,7 @@ namespace DevTxt.Core
             if (!seeded)
             {
                 seeded = true;
-                foreach (var c in w.Cards) if (!c.App.IsIntegration && !c.App.Soon && !c.S.Installed) chosen.Add(c.App.Id);
+                foreach (var c in w.Cards) if (c.App.HasExe && !c.App.Soon && !c.S.Installed && c.App.Recommended) chosen.Add(c.App.Id);
                 installSelf = w.DemoMode || !SelfUpdate.IsInstalled;
                 autostart = false;   // в автозапуск core.txt попадает, только если человек сам это включил
             }
@@ -169,7 +169,7 @@ namespace DevTxt.Core
             bool any = false;
             foreach (var c in w.Cards)
             {
-                if (c.App.IsIntegration || (c.App.Soon && !c.S.Installed)) continue;   // что ещё не выпущено, поставить нельзя
+                if (!c.App.HasExe || (c.App.Soon && !c.S.Installed)) continue;   // дополнения для Discord и Steam ставятся потом, с карточки
                 var card = c;
                 if (!any) { Title("Что поставить"); any = true; }
                 if (c.S.Installed) Row(c.App.Name.ToLowerInvariant() + ".txt", c.App.Tagline + " · уже установлено", null);

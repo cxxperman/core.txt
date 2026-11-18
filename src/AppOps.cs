@@ -82,6 +82,21 @@ namespace DevTxt.Core
                 s.Path = marker != null && File.Exists(marker) ? marker : null;
                 return;
             }
+            if (app.IsBundle)
+            {
+                string marker = Expand(app.Marker);
+                s.Path = marker != null && File.Exists(marker) ? marker : null;
+                s.Version = null;
+                s.Running = false;
+                if (s.Path != null)
+                {
+                    // Какую версию ставили — записано рядом; набор, поставленный руками, версии не имеет
+                    try { Version v; if (Version.TryParse(File.ReadAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(s.Path), VersionFile)).Trim(), out v)) s.Version = v; } catch { }
+                }
+                Release latest;
+                if (State.Latest.TryGetValue(app.Id, out latest)) s.Latest = latest;
+                return;
+            }
             bool running;
             string live = RunningPath(app, out running);
             s.Running = running;
@@ -97,6 +112,44 @@ namespace DevTxt.Core
             if (State.Latest.TryGetValue(app.Id, out r)) s.Latest = r;
         }
 
+        const string VersionFile = ".core-version";
+
+        // Куда класть часть набора: первое из мест, у которого уже есть родительская папка; иначе просто первое
+        public static string PickTarget(BundleTarget t)
+        {
+            foreach (string to in t.To)
+            {
+                string p = Expand(to);
+                if (p != null && Directory.Exists(System.IO.Path.GetDirectoryName(p))) return p;
+            }
+            return Expand(t.To[0]);
+        }
+
+        // Раскладывает архив набора по местам. Каждый файл обязан лечь строго внутрь своей папки назначения.
+        public static void ExtractBundle(string zipFile, List<KeyValuePair<string, string>> parts)
+        {
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(zipFile))
+                foreach (var part in parts)
+                {
+                    string from = part.Key, dest = System.IO.Path.GetFullPath(part.Value);
+                    int count = 0;
+                    foreach (var entry in zip.Entries)
+                    {
+                        string name = entry.FullName.Replace('\\', '/');
+                        if (!name.StartsWith(from, StringComparison.OrdinalIgnoreCase) || name.EndsWith("/")) continue;
+                        string rel = name.Substring(from.Length);
+                        if (rel.Length == 0 || rel.Contains("..") || rel.Contains(":") || rel.StartsWith("/")) throw new Exception("В архиве файл с недопустимым путём: " + name);
+                        string target = System.IO.Path.GetFullPath(System.IO.Path.Combine(dest, rel.Replace('/', '\\')));
+                        if (!target.StartsWith(dest + "\\", StringComparison.OrdinalIgnoreCase)) throw new Exception("В архиве файл с недопустимым путём: " + name);
+                        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(target));
+                        using (var input = entry.Open())
+                        using (var output = File.Create(target)) input.CopyTo(output);
+                        count++;
+                    }
+                    if (count == 0) throw new Exception("В архиве нет папки «" + from.TrimEnd('/') + "»");
+                }
+        }
+
         public static void Launch(string path)
         {
             Process.Start(new ProcessStartInfo(path) { WorkingDirectory = System.IO.Path.GetDirectoryName(path), UseShellExecute = true });
@@ -105,6 +158,24 @@ namespace DevTxt.Core
         // Ставит скачанный файл. Вызывается в фоне; ошибки — исключением с понятным текстом.
         public static void Install(AppEntry app, AppStatus s, string file)
         {
+            if (app.IsBundle)
+            {
+                string need = app.Requires != null ? Expand(app.Requires) : null;
+                if (app.Requires != null && (need == null || !Directory.Exists(need))) throw new Exception(string.IsNullOrEmpty(app.RequiresHint) ? "Не найдена программа, для которой это дополнение" : app.RequiresHint);
+                var parts = new List<KeyValuePair<string, string>>();
+                foreach (var t in app.Targets)
+                {
+                    string dest = PickTarget(t);
+                    if (dest == null) throw new Exception(string.IsNullOrEmpty(app.RequiresHint) ? "Не найдена папка Steam" : app.RequiresHint);
+                    parts.Add(new KeyValuePair<string, string>(t.From, dest));
+                }
+                ExtractBundle(file, parts);
+                string marker = Expand(app.Marker);
+                if (marker != null && File.Exists(marker) && s.Latest != null)
+                    File.WriteAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(marker), VersionFile), s.Latest.Version.ToString());
+                Releases.TryDelete(file);
+                return;
+            }
             if (app.Kind == "installer")
             {
                 // Установщик сам закрывает приложение и кладёт файлы на место; «тихий» ключ — без окон

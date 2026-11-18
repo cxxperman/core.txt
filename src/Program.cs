@@ -6,6 +6,7 @@
 //   --tray              запуститься без окна, только значок в трее и хаб
 //   --selftest          проверить разбор каталога, ответа GitHub и замену файла; код выхода 0 — всё в порядке
 //   --hub порт          запустить только хаб на этом порту, без окна (для проверок из kit.txt)
+//   --install имя       поставить или обновить приложение из каталога без окна и напечатать, чем кончилось
 //   --latest            спросить у GitHub последние версии приложений из каталога и напечатать их
 //   --fetch адрес сумма размер   скачать файл с проверкой размера и SHA-256 (для проверки на своём компьютере)
 using System;
@@ -31,6 +32,7 @@ namespace DevTxt.Core
             for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "--shot") shot = args[i + 1];
             if (Array.IndexOf(args, "--selftest") >= 0) return SelfTest.Run();
             if (Array.IndexOf(args, "--latest") >= 0) return SelfTest.Latest();
+            for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "--install") return SelfTest.InstallNow(args[i + 1]);
             for (int i = 0; i + 1 < args.Length; i++)
                 if (args[i] == "--hub")
                 {
@@ -129,6 +131,48 @@ namespace DevTxt.Core
             s.Version = new Version(1, 10, 0);
             Check(!s.UpdateAvailable, "same version is not an update");
 
+            // Набор (тема и плагин для Steam): принимается только в папку Steam и раскладывается строго по своим местам
+            {
+                var bundles = Catalog.Read(@"{ ""apps"": [
+                    { ""id"": ""ok"", ""name"": ""Ok"", ""kind"": ""bundle"", ""repo"": ""cxxperman/x"", ""asset"": ""x.zip"", ""marker"": ""{steam}\\millennium\\plugins\\x\\plugin.json"", ""requires"": ""{steam}\\millennium"",
+                      ""targets"": [ { ""from"": ""plugin/"", ""to"": ""{steam}\\millennium\\plugins\\x"" }, { ""from"": ""theme/"", ""to"": [ ""{steam}\\millennium\\themes\\x"", ""{steam}\\steamui\\skins\\x"" ] } ] },
+                    { ""id"": ""out"", ""name"": ""Out"", ""kind"": ""bundle"", ""repo"": ""cxxperman/x"", ""asset"": ""x.zip"", ""marker"": ""{steam}\\a\\m.json"", ""targets"": [ { ""from"": ""plugin/"", ""to"": ""C:\\Windows\\x"" } ] },
+                    { ""id"": ""up"", ""name"": ""Up"", ""kind"": ""bundle"", ""repo"": ""cxxperman/x"", ""asset"": ""x.zip"", ""marker"": ""{steam}\\a\\m.json"", ""targets"": [ { ""from"": ""plugin/"", ""to"": ""{steam}\\..\\x"" } ] },
+                    { ""id"": ""exe"", ""name"": ""Exe"", ""kind"": ""bundle"", ""repo"": ""cxxperman/x"", ""asset"": ""x.exe"", ""marker"": ""{steam}\\a\\m.json"", ""targets"": [ { ""from"": ""plugin/"", ""to"": ""{steam}\\a"" } ] }
+                ] }");
+                Check(bundles.Count == 1 && bundles[0].Id == "ok" && bundles[0].Targets.Count == 2 && bundles[0].Targets[1].To.Count == 2, "a bundle may only target the Steam folder, got " + bundles.Count);
+
+                string bdir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-bundle-" + System.Diagnostics.Process.GetCurrentProcess().Id);
+                System.IO.Directory.CreateDirectory(bdir);
+                try
+                {
+                    string zipPath = System.IO.Path.Combine(bdir, "b.zip");
+                    Action<string, string[]> make = delegate(string path, string[] names)
+                    {
+                        if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                        using (var fs = System.IO.File.Create(path))
+                        using (var z = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+                            foreach (string n in names) using (var w = new System.IO.StreamWriter(z.CreateEntry(n).Open())) w.Write(n);
+                    };
+                    make(zipPath, new string[] { "plugin/plugin.json", "plugin/.millennium/Dist/index.js", "theme\\skin.json", "readme.txt" });
+                    string p1 = System.IO.Path.Combine(bdir, "plugins", "x"), p2 = System.IO.Path.Combine(bdir, "themes", "x");
+                    var parts = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, string>> {
+                        new System.Collections.Generic.KeyValuePair<string, string>("plugin/", p1), new System.Collections.Generic.KeyValuePair<string, string>("theme/", p2) };
+                    AppOps.ExtractBundle(zipPath, parts);
+                    Check(System.IO.File.Exists(System.IO.Path.Combine(p1, "plugin.json")) && System.IO.File.Exists(System.IO.Path.Combine(p1, ".millennium", "Dist", "index.js")) && System.IO.File.Exists(System.IO.Path.Combine(p2, "skin.json")), "bundle parts land in their folders");
+                    Check(System.IO.Directory.GetFiles(bdir, "readme.txt", System.IO.SearchOption.AllDirectories).Length == 0, "files outside the listed folders are not extracted");
+                    make(zipPath, new string[] { "plugin/../../evil.txt" });
+                    bool refused = false;
+                    try { AppOps.ExtractBundle(zipPath, parts); } catch { refused = true; }
+                    Check(refused && !System.IO.File.Exists(System.IO.Path.Combine(bdir, "evil.txt")), "a path that climbs out of the folder is refused");
+                    make(zipPath, new string[] { "other/a.txt" });
+                    refused = false;
+                    try { AppOps.ExtractBundle(zipPath, parts); } catch { refused = true; }
+                    Check(refused, "an archive without the expected folder is refused");
+                }
+                finally { try { System.IO.Directory.Delete(bdir, true); } catch { } }
+            }
+
             // Сценарии: пока условие верно, настройка держится; потом возвращается как было
             {
                 var states = new System.Collections.Generic.Dictionary<string, object>();
@@ -206,6 +250,7 @@ namespace DevTxt.Core
             foreach (var app in Catalog.Apps)
             {
                 if (app.IsIntegration) continue;
+                if (app.Soon) { Console.WriteLine(app.Id + ": not released yet"); continue; }
                 try
                 {
                     Release r = Releases.Latest(app);
@@ -215,6 +260,30 @@ namespace DevTxt.Core
                 catch (Exception e) { bad++; Console.WriteLine(app.Id + ": " + e.Message); }
             }
             return bad;
+        }
+
+        // То же, что кнопка «Установить» или «Обновить» на карточке, только без окна
+        public static int InstallNow(string id)
+        {
+            State.Load();
+            Catalog.Load();
+            AppEntry app = Catalog.Apps.Find(delegate(AppEntry a) { return a.Id == id; });
+            if (app == null || app.IsIntegration) { Console.WriteLine("нет такого приложения в каталоге: " + id); return 2; }
+            try
+            {
+                var s = new AppStatus();
+                AppOps.Refresh(app, s);
+                Console.WriteLine("было: " + (s.Installed ? (s.Version == null ? "установлено" : s.Version.ToString()) : "не установлено"));
+                s.Latest = Releases.Latest(app);
+                if (s.Latest == null) { Console.WriteLine("в релизах нет файла " + app.Asset); return 3; }
+                if (s.Installed && s.Version != null && s.Latest.Version <= s.Version) { Console.WriteLine("уже последняя версия " + s.Version); return 0; }
+                string file = Releases.Download(s.Latest, null);
+                AppOps.Install(app, s, file);
+                AppOps.Refresh(app, s);
+                Console.WriteLine("стало: " + (s.Installed ? (s.Version == null ? "установлено" : s.Version.ToString()) + " — " + s.Path : "не установлено"));
+                return s.Installed ? 0 : 4;
+            }
+            catch (Exception e) { Console.WriteLine("не получилось: " + e.Message); return 1; }
         }
 
         public static int Fetch(string url, string sha, string size)

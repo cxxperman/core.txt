@@ -93,7 +93,7 @@ namespace DevTxt.Core
         static string V(Version v) { return v.Major + "." + v.Minor + "." + v.Build; }
 
         // Приводит карточку в соответствие с S. Действия кнопок задаёт окно.
-        public void Render(Action<Card> install, Action<Card> open, Func<string, Card> find)
+        public void Render(Action<Card> install, Action<Card> open, Func<string, Card> find, Action<Card> connect, Func<string, bool> connected)
         {
             ShowIcon();
             Color dotColor = Tokens.Dark.Label3;
@@ -116,7 +116,9 @@ namespace DevTxt.Core
                 text = S.Installed ? "Подключено" : "Не подключено";
                 if (S.Installed) dotColor = Tokens.Palette.Green;
                 hint = S.Installed ? "" : App.Hint;
-                if (via != null && via.S.Installed) Main.Set("Открыть " + via.App.Name.ToLowerInvariant() + ".txt", null, true, delegate { open(via); });
+                // Подключить можно прямо отсюда, если приложение, которое это делает, сейчас на связи
+                if (!S.Installed && App.Connect != null && via != null && connected(via.App.Id)) Main.Set("Подключить", App.Color, true, delegate { connect(this); });
+                else if (via != null && via.S.Installed) Main.Set("Открыть " + via.App.Name.ToLowerInvariant() + ".txt", null, true, delegate { open(via); });
                 else if (via != null) Main.Set("Нужна " + via.App.Name.ToLowerInvariant() + ".txt", null, false, null);
                 else Main.Hide();
             }
@@ -140,15 +142,17 @@ namespace DevTxt.Core
             else
             {
                 text = (S.Version != null ? "Версия " + V(S.Version) : "Установлено") + (S.Running ? " · запущено" : "");
+                if (!App.HasExe) dotColor = Tokens.Palette.Green;
                 if (S.Running) dotColor = Tokens.Palette.Green;
                 if (S.UpdateAvailable)
                 {
                     hint = "Есть обновление " + V(S.Latest.Version) + (S.Running ? " — приложение перезапустится" : "");
                     dotColor = Tokens.Palette.Orange;
                     Main.Set("Обновить", App.Color, true, delegate { install(this); });
-                    Second.Set("Открыть", null, true, delegate { open(this); });
+                    if (App.HasExe) Second.Set("Открыть", null, true, delegate { open(this); });
                 }
-                else Main.Set("Открыть", null, true, delegate { open(this); });
+                else if (App.HasExe) Main.Set("Открыть", null, true, delegate { open(this); });
+                else { Main.Hide(); hint = App.Hint; }   // набор: открывать нечего, зато есть что сказать, как его включить
             }
 
             if (S.Error != null && !busy) { hint = S.Error; note.Foreground = Ui.Solid(Tokens.Palette.Red); }

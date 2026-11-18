@@ -11,7 +11,8 @@
       "asset": "Kapsula.exe",
       "exe": "Kapsula.exe",
       "process": "Kapsula",
-      "sprite": [".#.......#.", ".##.....##.", ".#########.", "###########", "##E#####E##", "##E#####E##", "###########", ".#########.", ".#.#...#.#."]
+      "sprite": [".#.......#.", ".##.....##.", ".#########.", "###########", "##E#####E##", "##E#####E##", "###########", ".#########.", ".#.#...#.#."],
+      "recommended": true
     },
     {
       "id": "aura",
@@ -24,7 +25,8 @@
       "silent": "/S",
       "installed": "%LOCALAPPDATA%\\Programs\\Aura\\Aura.exe",
       "process": "Aura",
-      "sprite": ["....##......", "...####....#", "..######..##", ".###########", "##E########.", "##E########.", ".###########", "..######..##", "...####....#", "....##......"]
+      "sprite": ["....##......", "...####....#", "..######..##", ".###########", "##E########.", "##E########.", ".###########", "..######..##", "...####....#", "....##......"],
+      "recommended": true
     },
     {
       "id": "maska",
@@ -34,21 +36,36 @@
       "kind": "integration",
       "marker": "%APPDATA%\\Vencord\\dist\\kapsula.txt",
       "via": "kapsula",
-      "hint": "Подключается в Kapsula: Настройки → Steam и Discord",
+      "hint": "Подключается через kapsula.txt: запустите её и нажмите «Подключить». Discord при этом должен быть закрыт",
       "sprite": ["#..........#", "##........##", "############", "###E####E###", "###E####E###", "############", ".####..####.", "..##....##.."],
-      "soon": true
+      "connect": "discord.connect"
     },
     {
       "id": "arkada",
       "name": "Arkada",
-      "tagline": "Игры и уведомления Steam в общем стиле",
+      "tagline": "Тема и плагин для Steam в общем стиле · бета",
       "color": "#2A8FD8",
-      "kind": "integration",
-      "marker": "{steam}\\millennium\\plugins\\kapsula\\plugin.json",
-      "via": "kapsula",
-      "hint": "Подключается в Kapsula: Настройки → Steam и Discord",
+      "kind": "bundle",
+      "marker": "{steam}\\millennium\\plugins\\arkada\\plugin.json",
+      "hint": "Включите плагин и тему Arkada в настройках Millennium и перезапустите Steam",
       "sprite": [".####..####.", "############", "##E######E##", "#EEE####E#E#", "##E######E##", "############", "####....####", ".##......##."],
-      "soon": true
+      "repo": "cxxperman/arkada.txt",
+      "asset": "arkada.zip",
+      "requires": "{steam}\\millennium",
+      "requiresHint": "Сначала установите Millennium для Steam (steambrew.app) и запустите Steam один раз",
+      "targets": [
+        {
+          "from": "plugin/",
+          "to": "{steam}\\millennium\\plugins\\arkada"
+        },
+        {
+          "from": "theme/",
+          "to": [
+            "{steam}\\millennium\\themes\\arkada",
+            "{steam}\\steamui\\skins\\arkada"
+          ]
+        }
+      ]
     },
     {
       "id": "dock",
@@ -60,7 +77,6 @@
       "asset": "Dock.exe",
       "exe": "Dock.exe",
       "process": "Dock",
-      "soon": true,
       "sprite": ["....####....", "....#E##....", ".##.#E##.##.", ".##.####.##.", ".##.####.##.", "............", "############", ".##########."]
     },
     {
@@ -73,7 +89,6 @@
       "asset": "Smena.exe",
       "exe": "Smena.exe",
       "process": "Smena",
-      "soon": true,
       "sprite": ["#######.....", "#######.....", "##..........", "##.#########", "##.##E###E##", "##.##E###E##", "...#########", "...#########"]
     },
     {
@@ -86,7 +101,6 @@
       "asset": "Metla.exe",
       "exe": "Metla.exe",
       "process": "Metla",
-      "soon": true,
       "sprite": [".......##.", "......##..", ".....##...", "....##....", "...##.....", "..####....", ".######...", ".##E###...", "###E####..", "########..", "#.#.#.#.#.", "#.#.#.#.#."]
     }
   ]

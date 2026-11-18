@@ -148,7 +148,7 @@ namespace DevTxt.Core
                 object data;
                 w.States.TryGetValue(c.App.Id + ".settings", out data);
                 var settings = data as Dictionary<string, object>;
-                if (settings == null && (c.App.IsIntegration || !c.S.Installed)) continue;   // показывать нечего
+                if (settings == null && (!c.App.HasExe || !c.S.Installed)) continue;   // показывать нечего
                 AppTitle(c);
                 if (settings == null)
                 {

@@ -27,7 +27,9 @@ try {
         "$fw\System.Core.dll",
         "$fw\System.Web.Extensions.dll",
         "$fw\System.Windows.Forms.dll",
-        "$fw\System.Drawing.dll"
+        "$fw\System.Drawing.dll",
+        "$fw\System.IO.Compression.dll",
+        "$fw\System.IO.Compression.FileSystem.dll"
     )
     $a = @('/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/utf8output', '/codepage:65001', "/out:$tmp\Core.exe")
     $a += $refs | ForEach-Object { "/r:$_" }

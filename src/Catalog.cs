@@ -16,9 +16,24 @@ namespace DevTxt.Core
     {
         public string Id, Name, Tagline, Kind, Repo, Asset, Exe, Process, Silent, Installed, Marker, Via, Hint;
         public Color Color;
+        public bool Recommended;   // отмечено на первом запуске по умолчанию
         public bool Soon;         // ещё не выпущено: пока его нет на компьютере, вместо кнопки — «В разработке»
         public string[] Sprite;   // пиксельный значок: строки из «.» (пусто), «#» (тело) и «E» (глаз)
         public bool IsIntegration { get { return Kind == "integration"; } }
+        // «Набор»: архив из релиза, который раскладывается по папкам другой программы (тема и плагин для Steam)
+        public bool IsBundle { get { return Kind == "bundle"; } }
+        public string Connect;          // для подключения: команда хаба приложению Via, которая его выполняет
+        public string Requires, RequiresHint;   // для набора: папка, без которой ставить некуда, и что сказать, если её нет
+        public List<BundleTarget> Targets = new List<BundleTarget>();
+        public bool HasExe { get { return Kind == "portable" || Kind == "installer"; } }
+    }
+
+    // Часть набора: что из архива (папка «from/») куда положить. Мест может быть несколько — берётся первое,
+    // у которого уже есть родительская папка: разные версии программы держат темы в разных местах.
+    class BundleTarget
+    {
+        public string From;
+        public List<string> To = new List<string>();
     }
 
     static class Json
@@ -57,6 +72,10 @@ namespace DevTxt.Core
         static readonly Regex SafeId = new Regex("^[a-z][a-z0-9-]{0,31}$");
         static readonly Regex SafeRepo = new Regex("^" + Owner + "/[A-Za-z0-9._-]{1,100}$");
         static readonly Regex SafeFile = new Regex(@"^[A-Za-z0-9._*-]{1,100}$");
+        static readonly Regex SafeFolder = new Regex(@"^[A-Za-z0-9._-]{1,40}/$");
+        static readonly Regex SafeCommand = new Regex(@"^[a-z][a-z0-9.]{0,40}$");
+        // Набор можно класть только внутрь папки Steam: каталог из сети не должен уметь писать куда попало
+        static readonly Regex SafeTarget = new Regex(@"^\{steam\}(\\(?!\.{1,2}(\\|$))[A-Za-z0-9._-]{1,40}){1,6}$");   // без «.» и «..» в пути
 
         public static void Load()
         {
@@ -126,9 +145,33 @@ namespace DevTxt.Core
                 a.Sprite = ReadSprite(d);
                 object soon;
                 a.Soon = d.TryGetValue("soon", out soon) && soon is bool && (bool)soon;
+                object rec;
+                a.Recommended = d.TryGetValue("recommended", out rec) && rec is bool && (bool)rec;
+                a.Connect = Json.Str(d, "connect");
+                if (a.Connect != null && !SafeCommand.IsMatch(a.Connect)) a.Connect = null;
+                a.Requires = Json.Str(d, "requires");
+                a.RequiresHint = Json.Str(d, "requiresHint");
                 if (a.Kind == "integration")
                 {
                     if (string.IsNullOrEmpty(a.Marker)) continue;
+                }
+                else if (a.Kind == "bundle")
+                {
+                    if (a.Repo == null || !SafeRepo.IsMatch(a.Repo) || a.Asset == null || !SafeFile.IsMatch(a.Asset) || a.Asset.Contains("*") || !a.Asset.EndsWith(".zip")) continue;
+                    if (string.IsNullOrEmpty(a.Marker) || !SafeTarget.IsMatch(a.Marker)) continue;   // рядом с отметкой пишется файл версии
+                    if (a.Requires != null && !SafeTarget.IsMatch(a.Requires)) continue;
+                    bool ok = true;
+                    foreach (object to in Json.List(d, "targets"))
+                    {
+                        var td = to as Dictionary<string, object>;
+                        var target = new BundleTarget { From = Json.Str(td, "from") };
+                        string one = Json.Str(td, "to");
+                        if (one != null) target.To.Add(one);
+                        else foreach (object p in Json.List(td, "to")) if (p is string) target.To.Add((string)p);
+                        if (target.From == null || !SafeFolder.IsMatch(target.From) || target.To.Count == 0 || !target.To.TrueForAll(delegate(string p) { return SafeTarget.IsMatch(p); })) { ok = false; break; }
+                        a.Targets.Add(target);
+                    }
+                    if (!ok || a.Targets.Count == 0) continue;
                 }
                 else if (a.Kind == "portable" || a.Kind == "installer")
                 {

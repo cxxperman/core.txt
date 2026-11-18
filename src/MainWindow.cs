@@ -86,7 +86,7 @@ namespace DevTxt.Core
 
             StartHub();
             StartTray();
-            timer.Tick += delegate { RefreshLocal(); };
+            timer.Tick += delegate { RefreshLocal(); TaskbarGuard.Check(); };   // док пропал, а панель задач спрятана — возвращаем
             timer.Start();
             Closing += delegate(object s, System.ComponentModel.CancelEventArgs e)
             {

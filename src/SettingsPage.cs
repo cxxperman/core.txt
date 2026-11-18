@@ -139,6 +139,15 @@ namespace DevTxt.Core
             Row("Запускать core.txt вместе с Windows", "Тихо, в трее: приложения сразу видят друг друга и общие настройки", new Switch(w.DemoMode ? true : Autostart.Enabled, delegate(bool on) { if (!w.DemoMode) Autostart.Set(on); }).Root);
             Row("Оставаться в трее после закрытия окна", "Иначе core.txt закрывается совсем, и связь между приложениями пропадает", new Switch(State.Tray, delegate(bool on) { State.Tray = on; if (!w.DemoMode) State.Save(); }).Root);
 
+            Title("Папка");
+            int outside = w.OutsideCount();
+            var home = new Btn();
+            if (outside > 0) home.Set("Собрать", Tokens.Palette.Brand, true, delegate { w.GatherAll(); });
+            else home.Set("Открыть папку", null, true, delegate { w.OpenHome(); });
+            Row("Все приложения в одной папке", outside > 0
+                ? "Не в общей папке dev.txt: " + outside + ". Перенос закроет и снова запустит эти приложения; Aura остаётся там, куда её поставил установщик"
+                : "Приложения dev.txt лежат вместе, в папке программ dev.txt", home.Root);
+
             Title("Обновления");
             Row("Проверять обновления при запуске", null, new Switch(State.AutoCheck, delegate(bool on) { State.AutoCheck = on; if (!w.DemoMode) State.Save(); }).Root);
 

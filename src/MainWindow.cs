@@ -96,6 +96,7 @@ namespace DevTxt.Core
             };
             if (State.Onboarded)
             {
+                if (State.GatherPending) { State.GatherPending = false; State.Save(); GatherAll(); }
                 StartPending();
                 if (State.AutoCheck && DateTime.UtcNow - State.Checked > TimeSpan.FromHours(1)) CheckAll();
             }
@@ -322,11 +323,12 @@ namespace DevTxt.Core
         }
 
         // ───────── Первый запуск ─────────
-        internal void FinishWelcome(List<string> install, bool installSelf, bool autostart)
+        internal void FinishWelcome(List<string> install, bool installSelf, bool autostart, bool gather)
         {
             if (DemoMode) return;
             State.Onboarded = true;
             State.Pending = install;
+            State.GatherPending = gather && installSelf;   // переносит уже установленная копия, после переезда самого core.txt
             if (autostart) Autostart.Set(true, installSelf ? SelfUpdate.InstalledPath : SelfUpdate.CurrentPath);
             State.Save();
             if (installSelf)
@@ -336,8 +338,46 @@ namespace DevTxt.Core
                 catch (Exception e) { notice = "Не удалось установить core.txt: " + e.Message; }
             }
             ShowPage(PApps);
+            if (gather) GatherAll();
             StartPending();
             if (State.AutoCheck) CheckAll();
+        }
+
+        // ───────── Одна папка на всё ─────────
+        internal int OutsideCount()
+        {
+            int n = Cards.FindAll(delegate(Card c) { return AppOps.Outside(c.App, c.S); }).Count;
+            return n + (SelfUpdate.IsInstalled || DemoMode ? 0 : 1);
+        }
+
+        // Переносит приложения dev.txt в общий дом, а последним — сам core.txt
+        internal async void GatherAll()
+        {
+            if (DemoMode) return;
+            notice = null;
+            foreach (var c in Cards.ToArray())
+            {
+                if (!AppOps.Outside(c.App, c.S) || c.S.Phase != Phase.Idle) continue;
+                var card = c;
+                card.S.Phase = Phase.Installing;
+                RenderAll();
+                try { await Task.Run(delegate { AppOps.Gather(card.App, card.S); }); }
+                catch (Exception e) { notice = e.Message; }
+                card.S.Phase = Phase.Idle;
+                AppOps.Refresh(card.App, card.S);
+            }
+            RenderAll();
+            if (notice == null && !SelfUpdate.IsInstalled)
+            {
+                try { SelfUpdate.InstallSelf(); Quit(); }
+                catch (Exception e) { notice = "Не удалось перенести core.txt: " + e.Message; RenderAll(); }
+            }
+        }
+
+        internal void OpenHome()
+        {
+            if (DemoMode) return;
+            try { System.IO.Directory.CreateDirectory(AppOps.Home); System.Diagnostics.Process.Start("explorer.exe", "\"" + AppOps.Home + "\""); } catch { }
         }
 
         // Ставит то, что выбрали на первом запуске

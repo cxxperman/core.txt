@@ -43,10 +43,148 @@ namespace DevTxt.Core
             return Environment.ExpandEnvironmentVariables(path);
         }
 
+        // Один дом на всю экосистему: «Программы\dev.txt». Здесь лежит сам core.txt и по папке на каждое приложение.
+        public static string HomeOverride;   // для проверок
+        public static string Home
+        {
+            get { return HomeOverride ?? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "dev.txt"); }
+        }
+
         public static string DefaultPath(AppEntry app)
         {
             if (app.Kind == "installer") return Expand(app.Installed);
+            return System.IO.Path.Combine(Home, app.Name, app.Exe);
+        }
+
+        // Куда приложение ставил core.txt 0.1.0 — чтобы найти его и перенести в общий дом
+        static string LegacyPath(AppEntry app)
+        {
+            if (app.Kind != "portable") return null;
             return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", app.Name, app.Exe);
+        }
+
+        const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+        // Путь к программе из записи автозапуска вида «"C:\…\App.exe" --ключ» (или без кавычек)
+        public static string PathFromCommand(string command)
+        {
+            if (string.IsNullOrEmpty(command)) return null;
+            command = command.Trim();
+            if (command.StartsWith("\"")) { int end = command.IndexOf('"', 1); return end > 1 ? command.Substring(1, end - 1) : null; }
+            int exe = command.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+            return exe > 0 ? command.Substring(0, exe + 4) : null;
+        }
+
+        // Переносная программа может лежать где угодно. Если она сейчас не запущена, её выдаёт запись в автозапуске Windows.
+        static string AutostartPath(AppEntry app)
+        {
+            // Имя файла программы: у переносной оно в каталоге, у поставленной установщиком — в конце её пути
+            string exe = app.Kind == "portable" ? app.Exe : app.Kind == "installer" && app.Installed != null ? System.IO.Path.GetFileName(app.Installed) : null;
+            if (string.IsNullOrEmpty(exe)) return null;
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey))
+                {
+                    if (k == null) return null;
+                    foreach (string name in k.GetValueNames())
+                    {
+                        string path = PathFromCommand(k.GetValue(name) as string);
+                        if (path != null && string.Equals(System.IO.Path.GetFileName(path), exe, StringComparison.OrdinalIgnoreCase)) return path;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static string ReplacePath(string command, string from, string to)
+        {
+            int at = command.IndexOf(from, StringComparison.OrdinalIgnoreCase);
+            return at < 0 ? command : command.Substring(0, at) + to + command.Substring(at + from.Length);
+        }
+
+        // Программа переехала — записи автозапуска, которые вели на старое место, ведут на новое
+        static void MoveAutostart(string from, string to)
+        {
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, true))
+                {
+                    if (k == null) return;
+                    foreach (string name in k.GetValueNames())
+                    {
+                        string command = k.GetValue(name) as string;
+                        if (command != null && command.IndexOf(from, StringComparison.OrdinalIgnoreCase) >= 0) k.SetValue(name, ReplacePath(command, from, to));
+                    }
+                }
+            }
+            catch { }
+        }
+
+        static bool SamePath(string a, string b)
+        {
+            try { return string.Equals(System.IO.Path.GetFullPath(a), System.IO.Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase); } catch { return false; }
+        }
+
+        // Стоит не в общем доме — можно перенести. Только для переносных: то, что ставил установщик, остаётся на его месте.
+        public static bool Outside(AppEntry app, AppStatus s)
+        {
+            return app.Kind == "portable" && s.Path != null && !SamePath(s.Path, DefaultPath(app));
+        }
+
+        // Закрывает программу, если запущен именно этот файл. true — была запущена.
+        static bool CloseRunning(AppEntry app, string path)
+        {
+            bool was = false;
+            if (string.IsNullOrEmpty(app.Process)) return false;
+            foreach (var p in Process.GetProcessesByName(app.Process))
+            {
+                try
+                {
+                    if (!SamePath(p.MainModule.FileName, path)) continue;   // другая копия — не наша забота
+                    was = true;
+                    p.Kill();
+                    p.WaitForExit(5000);
+                }
+                catch { }
+                finally { p.Dispose(); }
+            }
+            return was;
+        }
+
+        // Переносит программу в общий дом: закрывает её, перекладывает файл, поправляет автозапуск и ярлык, запускает снова.
+        // Если в доме уже лежит копия не старее — лишняя снаружи просто убирается.
+        public static void Gather(AppEntry app, AppStatus s)
+        {
+            if (!Outside(app, s)) return;
+            string from = s.Path, to = DefaultPath(app);
+            bool wasRunning = CloseRunning(app, from);
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(to));
+            Exception last = null;
+            for (int i = 0; i < 20; i++)   // файл освобождается не мгновенно
+            {
+                try
+                {
+                    if (File.Exists(to))
+                    {
+                        Version have = FileVersion(to), bring = FileVersion(from);
+                        if (have != null && bring != null && bring > have) File.Delete(to);
+                        else { File.Delete(from); last = null; break; }
+                    }
+                    File.Move(from, to);
+                    last = null;
+                    break;
+                }
+                catch (Exception e) { last = e; Thread.Sleep(250); }
+            }
+            if (last != null) throw new Exception("Не удалось перенести " + app.Name + ": " + (last is UnauthorizedAccessException ? "нет прав на её папку" : "файл занят"));
+            Releases.TryDelete(from + ".old");
+            try { string dir = System.IO.Path.GetDirectoryName(from); if (Directory.GetFileSystemEntries(dir).Length == 0) Directory.Delete(dir); } catch { }   // пустую прежнюю папку — тоже
+            MoveAutostart(from, to);
+            Shortcuts.Add(app.Name, to);
+            State.Paths[app.Id] = to;
+            State.Save();
+            if (wasRunning) { try { Launch(to); } catch { } }
         }
 
         static string RunningPath(AppEntry app, out bool running)
@@ -103,7 +241,7 @@ namespace DevTxt.Core
             string saved;
             State.Paths.TryGetValue(app.Id, out saved);
             string found = null;
-            foreach (string c in new string[] { live, saved, DefaultPath(app) })
+            foreach (string c in new string[] { live, saved, DefaultPath(app), AutostartPath(app), LegacyPath(app) })
                 if (!string.IsNullOrEmpty(c) && File.Exists(c)) { found = c; break; }
             s.Path = found;
             s.Version = found != null ? FileVersion(found) : null;
@@ -179,12 +317,16 @@ namespace DevTxt.Core
             if (app.Kind == "installer")
             {
                 // Установщик сам закрывает приложение и кладёт файлы на место; «тихий» ключ — без окон
+                bool wasOpen = !string.IsNullOrEmpty(app.Process) && Process.GetProcessesByName(app.Process).Length > 0;
                 using (var p = Process.Start(new ProcessStartInfo(file, app.Silent) { UseShellExecute = false }))
                 {
                     if (!p.WaitForExit(10 * 60 * 1000)) throw new Exception("Установщик не закончил работу за десять минут");
                     if (p.ExitCode != 0) throw new Exception("Установщик завершился с ошибкой " + p.ExitCode);
                 }
                 Releases.TryDelete(file);
+                // Установщик закрыл приложение и не открыл снова — возвращаем как было
+                string installed = s.Path != null && File.Exists(s.Path) ? s.Path : Expand(app.Installed);
+                if (wasOpen && installed != null && File.Exists(installed)) { try { Launch(installed); } catch { } }
                 return;
             }
 
@@ -222,7 +364,47 @@ namespace DevTxt.Core
             if (last != null) throw new Exception("Не удалось заменить файл программы: " + (last is UnauthorizedAccessException ? "нет прав на запись в её папку" : "он занят"));
             State.Paths[app.Id] = target;
             State.Save();
+            Shortcuts.Add(app.Name, target);
             if (wasRunning) { try { Launch(target); } catch { } }
+        }
+    }
+
+    // Ярлыки в меню «Пуск» — тоже в одном месте: папка «dev.txt»
+    static class Shortcuts
+    {
+        public static string Folder
+        {
+            get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "dev.txt"); }
+        }
+
+        public static void Add(string name, string target)
+        {
+            if (AppOps.HomeOverride != null) return;   // проверки в меню «Пуск» ничего не пишут
+            try
+            {
+                Directory.CreateDirectory(Folder);
+                Create(System.IO.Path.Combine(Folder, name.ToLowerInvariant() + ".txt.lnk"), target, name.ToLowerInvariant() + ".txt — dev.txt");
+            }
+            catch { }   // без ярлыка тоже можно жить
+        }
+
+        // Ярлык делает сама Windows (WScript.Shell): своего формата .lnk не пишем
+        static void Create(string lnk, string target, string description)
+        {
+            Type type = Type.GetTypeFromProgID("WScript.Shell");
+            if (type == null) return;
+            object shell = Activator.CreateInstance(type);
+            try
+            {
+                object s = type.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { lnk });
+                Type st = s.GetType();
+                st.InvokeMember("TargetPath", System.Reflection.BindingFlags.SetProperty, null, s, new object[] { target });
+                st.InvokeMember("WorkingDirectory", System.Reflection.BindingFlags.SetProperty, null, s, new object[] { System.IO.Path.GetDirectoryName(target) });
+                st.InvokeMember("Description", System.Reflection.BindingFlags.SetProperty, null, s, new object[] { description });
+                st.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, s, null);
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(s);
+            }
+            finally { System.Runtime.InteropServices.Marshal.ReleaseComObject(shell); }
         }
     }
 }

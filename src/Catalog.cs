@@ -203,6 +203,7 @@ namespace DevTxt.Core
         public static bool Tray = true;           // оставаться в трее после закрытия окна
         public static bool AutoCheck = true;      // проверять обновления при запуске
         public static bool Onboarded;             // первый запуск пройден
+        public static bool GatherPending;         // после установки core.txt перенести приложения в общий дом
         public static readonly HashSet<string> Scenarios = new HashSet<string>();   // включённые сценарии
         public static List<string> Pending = new List<string>();                    // что поставить после первого запуска
 
@@ -236,6 +237,7 @@ namespace DevTxt.Core
                 Tray = Flag(set, "tray", true);
                 AutoCheck = Flag(set, "autoCheck", true);
                 Onboarded = Flag(set, "onboarded", false);
+                GatherPending = Flag(set, "gather", false);
                 foreach (object o in Json.List(d, "scenarios")) if (o is string) Scenarios.Add((string)o);
                 foreach (object o in Json.List(d, "pending")) if (o is string) Pending.Add((string)o);
             }
@@ -248,7 +250,7 @@ namespace DevTxt.Core
             {
                 var latest = new Dictionary<string, object>();
                 foreach (var p in Latest) latest[p.Key] = p.Value.ToDict();
-                var set = new Dictionary<string, object> { { "accent", Accent }, { "reducedMotion", ReducedMotion }, { "tray", Tray }, { "autoCheck", AutoCheck }, { "onboarded", Onboarded } };
+                var set = new Dictionary<string, object> { { "accent", Accent }, { "reducedMotion", ReducedMotion }, { "tray", Tray }, { "autoCheck", AutoCheck }, { "onboarded", Onboarded }, { "gather", GatherPending } };
                 var d = new Dictionary<string, object> { { "paths", Paths }, { "latest", latest }, { "checked", Checked.Ticks.ToString() }, { "settings", set },
                     { "scenarios", new List<string>(Scenarios) }, { "pending", Pending } };
                 Directory.CreateDirectory(Dir);

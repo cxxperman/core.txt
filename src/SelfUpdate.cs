@@ -22,19 +22,23 @@ namespace DevTxt.Core
         // Постоянное место core.txt на этом компьютере
         public static string InstalledPath
         {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "core.txt", "Core.exe"); }
+            get { return Path.Combine(AppOps.Home, "Core.exe"); }
         }
         public static bool IsInstalled { get { return string.Equals(CurrentPath, InstalledPath, StringComparison.OrdinalIgnoreCase); } }
 
-        static string ShortcutPath
-        {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "core.txt.lnk"); }
-        }
+        // Где core.txt 0.1.0 держал себя и свой ярлык — убирается, когда новая копия уже работает из общего дома
+        static string LegacyDir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "core.txt"); } }
+        static string LegacyShortcut { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "core.txt.lnk"); } }
 
         // Убирает «.old», оставшийся от прошлого обновления
         public static void Cleanup()
         {
             Releases.TryDelete(CurrentPath + ".old");
+            if (!IsInstalled) return;
+            Releases.TryDelete(Path.Combine(LegacyDir, "Core.exe"));
+            Releases.TryDelete(Path.Combine(LegacyDir, "Core.exe.old"));
+            try { if (Directory.Exists(LegacyDir) && Directory.GetFileSystemEntries(LegacyDir).Length == 0) Directory.Delete(LegacyDir); } catch { }
+            Releases.TryDelete(LegacyShortcut);
         }
 
         // Ставит скачанный файл на место target; прежний уходит в «.old». Годится и для работающего exe.
@@ -65,27 +69,8 @@ namespace DevTxt.Core
         {
             Directory.CreateDirectory(Path.GetDirectoryName(InstalledPath));
             File.Copy(CurrentPath, InstalledPath, true);
-            try { Shortcut(ShortcutPath, InstalledPath); } catch { }   // без ярлыка тоже можно жить
+            Shortcuts.Add("core", InstalledPath);
             Process.Start(new ProcessStartInfo(InstalledPath, "--after-install") { UseShellExecute = true });
-        }
-
-        // Ярлык делает сама Windows (WScript.Shell): своего формата .lnk не пишем
-        static void Shortcut(string lnk, string target)
-        {
-            Type type = Type.GetTypeFromProgID("WScript.Shell");
-            if (type == null) return;
-            object shell = Activator.CreateInstance(type);
-            try
-            {
-                object s = type.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { lnk });
-                Type st = s.GetType();
-                st.InvokeMember("TargetPath", BindingFlags.SetProperty, null, s, new object[] { target });
-                st.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, s, new object[] { Path.GetDirectoryName(target) });
-                st.InvokeMember("Description", BindingFlags.SetProperty, null, s, new object[] { "core.txt — лаунчер dev.txt" });
-                st.InvokeMember("Save", BindingFlags.InvokeMethod, null, s, null);
-                System.Runtime.InteropServices.Marshal.ReleaseComObject(s);
-            }
-            finally { System.Runtime.InteropServices.Marshal.ReleaseComObject(shell); }
         }
     }
 }

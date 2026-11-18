@@ -23,7 +23,7 @@
       "repo": "cxxperman/aura-voice",
       "asset": "Aura-Setup-*.exe",
       "silent": "/S",
-      "installed": "%LOCALAPPDATA%\\Programs\\Aura\\Aura.exe",
+      "installed": "%LOCALAPPDATA%\\Programs\\aura-voice\\Aura.exe",
       "process": "Aura",
       "sprite": ["....##......", "...####....#", "..######..##", ".###########", "##E########.", "##E########.", ".###########", "..######..##", "...####....#", "....##......"],
       "recommended": true

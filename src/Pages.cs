@@ -143,7 +143,7 @@ namespace DevTxt.Core
     class WelcomePage : Page
     {
         readonly HashSet<string> chosen = new HashSet<string>();
-        bool autostart, installSelf, seeded;
+        bool autostart, installSelf, gather = true, seeded;
 
         public WelcomePage(MainWindow w) : base(w) { }
 
@@ -184,9 +184,11 @@ namespace DevTxt.Core
             if (w.DemoMode || !SelfUpdate.IsInstalled)
                 Row("Установить core.txt на этот компьютер", "Скопировать в папку программ и добавить в меню «Пуск». Иначе он работает из той папки, где лежит сейчас", new Switch(installSelf, delegate(bool on) { installSelf = on; }).Root);
             Row("Запускать core.txt вместе с Windows", "Тихо, в трее: приложения сразу видят друг друга и общие настройки", new Switch(autostart, delegate(bool on) { autostart = on; }).Root);
+            if (w.DemoMode || w.OutsideCount() > (SelfUpdate.IsInstalled ? 0 : 1))
+                Row("Собрать приложения в одну папку", "Kapsula и остальные переедут в общую папку dev.txt рядом с core.txt: одно место вместо нескольких. Запущенные будут перезапущены. Aura остаётся там, куда её поставил установщик", new Switch(gather, delegate(bool on) { gather = on; }).Root);
 
             var done = new Btn();
-            done.Set("Готово", Tokens.Palette.Brand, true, delegate { w.FinishWelcome(new List<string>(chosen), installSelf, autostart); });
+            done.Set("Готово", Tokens.Palette.Brand, true, delegate { w.FinishWelcome(new List<string>(chosen), installSelf, autostart, gather); });
             done.Root.HorizontalAlignment = HorizontalAlignment.Right;
             done.Root.Margin = new Thickness(0, 14, 0, 0);
             done.Root.MinWidth = 140;

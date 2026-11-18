@@ -131,6 +131,34 @@ namespace DevTxt.Core
             s.Version = new Version(1, 10, 0);
             Check(!s.UpdateAvailable, "same version is not an update");
 
+            // Одна папка на всё: переносная программа переезжает в общий дом, лишняя копия снаружи убирается
+            {
+                string home = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-home-" + System.Diagnostics.Process.GetCurrentProcess().Id);
+                string away = System.IO.Path.Combine(home, "elsewhere");
+                System.IO.Directory.CreateDirectory(away);
+                AppOps.HomeOverride = System.IO.Path.Combine(home, "dev.txt");
+                try
+                {
+                    var one = new AppEntry { Id = "selftest-home", Name = "One", Kind = "portable", Exe = "One.exe", Process = "CoreTxtNoSuchProcess" };
+                    string outside = System.IO.Path.Combine(away, "One.exe"), inside = System.IO.Path.Combine(AppOps.HomeOverride, "One", "One.exe");
+                    System.IO.File.WriteAllText(outside, "app");
+                    var st = new AppStatus { Path = outside };
+                    Check(AppOps.Outside(one, st), "a program outside the home folder is noticed");
+                    AppOps.Gather(one, st);
+                    Check(System.IO.File.Exists(inside) && !System.IO.File.Exists(outside) && !System.IO.Directory.Exists(away), "it moves into the home folder and the empty old folder goes away");
+                    Check(!AppOps.Outside(one, new AppStatus { Path = inside }), "inside the home folder there is nothing to move");
+                    System.IO.Directory.CreateDirectory(away);
+                    System.IO.File.WriteAllText(outside, "copy");
+                    AppOps.Gather(one, new AppStatus { Path = outside });
+                    Check(!System.IO.File.Exists(outside) && System.IO.File.ReadAllText(inside) == "app", "a second copy outside is removed, the one at home is kept");
+                    Check(!AppOps.Outside(new AppEntry { Kind = "installer", Installed = "x" }, new AppStatus { Path = outside }), "what an installer placed is never moved");
+                    State.Paths.Remove("selftest-home");
+                }
+                finally { AppOps.HomeOverride = null; try { System.IO.Directory.Delete(home, true); } catch { } }
+                Check(AppOps.PathFromCommand("\"C:\\A b\\Kapsula.exe\" --wait") == "C:\\A b\\Kapsula.exe" && AppOps.PathFromCommand("C:\\X\\Dock.exe --tray") == "C:\\X\\Dock.exe" && AppOps.PathFromCommand("") == null, "the program path is read from an autostart entry");
+                Check(AppOps.ReplacePath("\"c:\\old\\Kapsula.exe\" --wait", "C:\\Old\\Kapsula.exe", "D:\\new\\Kapsula.exe") == "\"D:\\new\\Kapsula.exe\" --wait", "an autostart entry follows the program to its new place");
+            }
+
             // Набор (тема и плагин для Steam): принимается только в папку Steam и раскладывается строго по своим местам
             {
                 var bundles = Catalog.Read(@"{ ""apps"": [

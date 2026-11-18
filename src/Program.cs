@@ -2,6 +2,7 @@
 // Ключи для проверки:
 //   --demo              выдуманные состояния приложений; сеть и диск не трогаются
 //   --shot файл.png     нарисовать окно в файл и выйти (обычно вместе с --demo)
+//   --motion папка      вместе с --demo: показать окно, проиграть все действия и сложить кадры движения в папку
 //   --page имя          открыть сразу страницу: scenarios, settings или welcome; --scroll N — прокрутить её (для снимков)
 //   --tray              запуститься без окна, только значок в трее и хаб
 //   --selftest          проверить разбор каталога, ответа GitHub и замену файла; код выхода 0 — всё в порядке
@@ -55,7 +56,9 @@ namespace DevTxt.Core
 
             bool created = true;
             Mutex mutex = null;
-            if (shot == null) mutex = new Mutex(true, "devtxt_core_single_instance", out created);
+            string motion = null;
+            for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "--motion" && demo) motion = args[i + 1];
+            if (shot == null && motion == null) mutex = new Mutex(true, "devtxt_core_single_instance", out created);
             bool handover = Array.IndexOf(args, "--after-update") >= 0 || Array.IndexOf(args, "--after-install") >= 0;
             if (!created && handover)
             {
@@ -72,8 +75,16 @@ namespace DevTxt.Core
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             if (!demo) { State.Load(); SelfUpdate.Cleanup(); }
             Catalog.Load();
-            var w = new MainWindow(demo, page);
+            var w = new MainWindow(demo, page, Array.IndexOf(args, "--after-install") >= 0);
             if (shot != null) { w.Shot(shot, scroll); return 0; }
+            if (motion != null)
+            {
+                int code = 0;
+                app.DispatcherUnhandledException += delegate(object s, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e) { Console.Error.WriteLine(e.Exception); code = 1; e.Handled = true; app.Shutdown(); };
+                w.MotionTest(motion, delegate { app.Shutdown(); });
+                app.Run();
+                return code;
+            }
 
             var show = new EventWaitHandle(false, EventResetMode.AutoReset, "devtxt_core_show");
             new Thread(delegate() { while (true) { show.WaitOne(); w.Dispatcher.BeginInvoke(new Action(w.ShowWindow)); } }) { IsBackground = true }.Start();

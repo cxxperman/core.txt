@@ -418,6 +418,14 @@ namespace DevTxt.Core
         }
 
         // Ставит скачанный файл. Вызывается в фоне; ошибки — исключением с понятным текстом.
+        // Есть ли куда ставить: набору для Steam нужен сам Steam с Millennium
+        public static bool Ready(AppEntry app)
+        {
+            if (!app.IsBundle || app.Requires == null) return true;
+            string need = Expand(app.Requires);
+            return need != null && Directory.Exists(need);
+        }
+
         public static void Install(AppEntry app, AppStatus s, string file)
         {
             if (app.IsBundle)

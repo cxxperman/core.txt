@@ -34,6 +34,9 @@ namespace DevTxt.Core
         readonly TextBlock removeLink;
         readonly StackPanel removeRow;
         bool confirming, withData;
+        // Что было в прошлый раз — чтобы отметить движением то, что изменилось
+        bool drawn, wasBusy, wasInstalled;
+        string wasError;
 
         public Card(AppEntry app)
         {
@@ -122,11 +125,14 @@ namespace DevTxt.Core
             Color dotColor = Tokens.Dark.Label3;
             string text, hint = "";
             bool busy = S.Phase != Phase.Idle;
-            bar.Root.Visibility = S.Phase == Phase.Downloading ? Visibility.Visible : Visibility.Collapsed;
-            bar.Value = S.Progress;
+            // Полоса: при скачивании считает, при установке и удалении — бегает
+            Motion.Show(bar.Root, busy);
+            bar.Busy = busy && S.Phase != Phase.Downloading;
+            if (S.Phase == Phase.Downloading) bar.Value = S.Progress;
+            status.Busy = busy;
             Second.Hide();
             if (!S.Installed || busy) confirming = false;
-            removeRow.Visibility = confirming && App.Data != null ? Visibility.Visible : Visibility.Collapsed;
+            Motion.Show(removeRow, confirming && App.Data != null);
             removeLink.Visibility = S.Installed && !busy && !confirming && App.Removable ? Visibility.Visible : Visibility.Collapsed;
 
             if (S.Phase == Phase.Removing)
@@ -198,8 +204,23 @@ namespace DevTxt.Core
             if (S.Error != null && !busy) { hint = S.Error; note.Foreground = Ui.Solid(Tokens.Palette.Red); }
             else note.Foreground = Ui.Label3;
             status.Set(text, dotColor);
-            note.Text = hint;
-            note.Visibility = hint == "" ? Visibility.Collapsed : Visibility.Visible;
+            if (hint != "") Motion.Swap(note, hint);
+            Motion.Show(note, hint != "");
+
+            // Движением отмечаем то, что случилось с прошлого раза: работа началась, получилось, не получилось
+            string error = busy ? null : S.Error;
+            if (drawn)
+            {
+                if (busy && !wasBusy) Motion.Breathe(tile, true);
+                else if (!busy && wasBusy)
+                {
+                    if (error != null) Motion.Breathe(tile, false);
+                    else { Motion.Pop(tile); Motion.Glow(Root, S.Installed ? App.Color : Tokens.Dark.Label3); }
+                }
+                if (error != null && error != wasError) Motion.Shake(Root);
+                else if (!busy && !wasBusy && S.Installed != wasInstalled) Motion.Pop(tile);
+            }
+            drawn = true; wasBusy = busy; wasInstalled = S.Installed; wasError = error;
         }
     }
 

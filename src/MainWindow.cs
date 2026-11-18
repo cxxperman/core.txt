@@ -28,7 +28,7 @@ namespace DevTxt.Core
         readonly HashSet<string> connectedApps = new HashSet<string>();
         readonly UniformGrid grid = new UniformGrid { Columns = 2, VerticalAlignment = VerticalAlignment.Top };
         readonly TextBlock footer = Ui.T("", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
-        readonly Btn checkBtn = new Btn();
+        readonly Btn checkBtn = new Btn(), allBtn = new Btn();
         readonly DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         readonly SettingsPage settings;
         readonly ScenariosPage scenariosPage;
@@ -50,7 +50,7 @@ namespace DevTxt.Core
         [DllImport("dwmapi.dll")]
         static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
-        public MainWindow(bool demo, int startPage)
+        public MainWindow(bool demo, int startPage, bool afterInstall)
         {
             DemoMode = demo;
             page = !demo && !State.Onboarded ? PWelcome : startPage;
@@ -96,7 +96,14 @@ namespace DevTxt.Core
             };
             if (State.Onboarded)
             {
-                if (State.GatherPending) { State.GatherPending = false; State.Save(); GatherAll(); }
+                // Нас только что поставил установщик: показываем третий шаг — что именно сейчас ставится
+                bool gatherNow = State.GatherPending;
+                if (afterInstall && (State.Pending.Count > 0 || gatherNow))
+                {
+                    welcome.ShowProgress(new List<string>(State.Pending), true, gatherNow);
+                    ShowPage(PWelcome);
+                }
+                if (gatherNow) { State.GatherPending = false; State.Save(); GatherAll(); }
                 StartPending();
                 if (State.AutoCheck && DateTime.UtcNow - State.Checked > TimeSpan.FromHours(1)) CheckAll();
             }
@@ -136,6 +143,10 @@ namespace DevTxt.Core
             checkBtn.Root.VerticalAlignment = VerticalAlignment.Center;
             DockPanel.SetDock(checkBtn.Root, Dock.Right);
             bar.Children.Add(checkBtn.Root);
+            allBtn.Root.VerticalAlignment = VerticalAlignment.Center; allBtn.Root.Margin = new Thickness(0, 0, 8, 0);
+            allBtn.Hide();
+            DockPanel.SetDock(allBtn.Root, Dock.Right);
+            bar.Children.Add(allBtn.Root);
             footer.VerticalAlignment = VerticalAlignment.Center;
             bar.Children.Add(footer);
             DockPanel.SetDock(bar, Dock.Bottom);
@@ -159,6 +170,7 @@ namespace DevTxt.Core
 
         void ShowPage(int i)
         {
+            int from = page;
             page = i;
             bool first = i == PWelcome;   // на первом запуске нет ни вкладок, ни нижней строки — только вопросы
             tabs.Root.Visibility = first ? Visibility.Collapsed : Visibility.Visible;
@@ -169,6 +181,9 @@ namespace DevTxt.Core
             settings.Root.Visibility = i == PSettings ? Visibility.Visible : Visibility.Collapsed;
             welcome.Root.Visibility = first ? Visibility.Visible : Visibility.Collapsed;
             RenderAll();
+            // Страница въезжает с той стороны, где её вкладка
+            FrameworkElement now = i == PApps ? appsView : i == PScenarios ? scenariosPage.Root : i == PSettings ? (FrameworkElement)settings.Root : null;
+            if (now != null && from != i) Motion.SlideIn(now, from == PWelcome ? 0 : i > from ? 28 : -28);
         }
 
         // Волна при переходе на страницу
@@ -212,7 +227,9 @@ namespace DevTxt.Core
             else if (page == PSettings) line = server != null && server.Error != null ? "Связь между приложениями не работает: " + server.Error : "Связь между приложениями работает · подключено: " + connectedApps.Count;
             else if (page == PScenarios) line = "Сценарии действуют, пока core.txt запущен";
             else line = (updates > 0 ? "Обновлений: " + updates + " · " : "") + when;
-            footer.Text = line + " · версия " + Program.VersionText + " · dev.txt™";
+            Motion.Swap(footer, line + " · версия " + Program.VersionText + " · dev.txt™");
+            int missing = Cards.FindAll(Installable).Count;
+            if (page == PApps && missing > 1) allBtn.Set("Установить всё", Tokens.Palette.Brand, true, InstallAll); else allBtn.Hide();
             footer.Foreground = notice != null ? Ui.Solid(Tokens.Palette.Red) : Ui.Label3;
             if (SelfUpdate.Available) checkBtn.Set("Обновить core.txt до " + SelfUpdate.Latest.Version, Tokens.Palette.Brand, !updatingSelf, UpdateSelf);
             else checkBtn.Set("Проверить обновления", null, !checking, CheckAll);
@@ -339,11 +356,16 @@ namespace DevTxt.Core
                 try { SelfUpdate.InstallSelf(); Quit(); return; }
                 catch (Exception e) { notice = "Не удалось установить core.txt: " + e.Message; }
             }
-            ShowPage(PApps);
+            welcome.ShowProgress(install, false, gather);
+            RenderAll();
             if (gather) GatherAll();
             StartPending();
             if (State.AutoCheck) CheckAll();
         }
+
+        internal void RenderWelcome() { if (page == PWelcome) welcome.Render(); }
+        internal void LeaveWelcome() { ShowPage(PApps); Animate(); }
+        internal bool GatherBusy;
 
         // ───────── Одна папка на всё ─────────
         internal int OutsideCount()
@@ -357,6 +379,7 @@ namespace DevTxt.Core
         {
             if (DemoMode) return;
             notice = null;
+            GatherBusy = true;
             foreach (var c in Cards.ToArray())
             {
                 if (!AppOps.Outside(c.App, c.S) || c.S.Phase != Phase.Idle) continue;
@@ -368,6 +391,7 @@ namespace DevTxt.Core
                 card.S.Phase = Phase.Idle;
                 AppOps.Refresh(card.App, card.S);
             }
+            GatherBusy = false;
             RenderAll();
             if (notice == null && !SelfUpdate.IsInstalled)
             {
@@ -501,7 +525,7 @@ namespace DevTxt.Core
                     c.S.Latest = found; State.Latest[app.Id] = found; State.Save();
                 }
                 Release r = c.S.Latest;
-                Action<double> progress = delegate(double p) { Dispatcher.BeginInvoke(new Action(delegate { c.S.Progress = p; if (c.S.Phase == Phase.Downloading) c.Render(Install, Open, Find, Connect, Connected); })); };
+                Action<double> progress = delegate(double p) { Dispatcher.BeginInvoke(new Action(delegate { c.S.Progress = p; if (c.S.Phase == Phase.Downloading) { c.Render(Install, Open, Find, Connect, Connected); RenderWelcome(); } })); };
                 string file = await Task.Run(delegate { return Releases.Download(r, progress); });
                 c.S.Phase = Phase.Installing;
                 RenderAll();
@@ -512,6 +536,18 @@ namespace DevTxt.Core
             c.S.Phase = Phase.Idle;
             AppOps.Refresh(app, c.S);
             RenderAll();
+        }
+
+        // Можно ли поставить это прямо сейчас одним щелчком
+        bool Installable(Card c)
+        {
+            return !c.App.Soon && !c.App.IsIntegration && !c.S.Installed && c.S.Phase == Phase.Idle && AppOps.Ready(c.App);
+        }
+
+        // «Установить всё»: всё, чего ещё нет и что можно поставить на этот компьютер
+        void InstallAll()
+        {
+            foreach (var c in Cards.FindAll(Installable)) Install(c);
         }
 
         async void RemoveApp(Card c, bool withData)
@@ -549,6 +585,19 @@ namespace DevTxt.Core
                 else if (c.App.Id == "maska") c.S.Path = "demo";
             }
             // То, что Kapsula присылает на самом деле (см. её CoreHub.cs), здесь — часть списка
+            string demoStep = Environment.GetEnvironmentVariable("CORE_DEMO_STEP");   // снимок нужного шага установщика
+            if (demoStep == "1") welcome.SetStep(1);
+            if (demoStep == "2")
+            {
+                welcome.ShowProgress(new List<string> { "kapsula", "aura", "dock" }, true, true);
+                foreach (var c in Cards)
+                {
+                    if (c.App.Id == "kapsula") { c.S.Path = "demo"; c.S.Version = new Version(0, 8, 0); }
+                    if (c.App.Id == "aura") { c.S.Path = null; c.S.Phase = Phase.Downloading; c.S.Progress = 0.62; }
+                    if (c.App.Id == "dock") { c.S.Path = null; }
+                }
+            }
+            else if (demoStep != null) foreach (var c in Cards) if (c.App.Id == "aura" || c.App.Id == "dock") { c.S.Path = null; c.S.Running = false; }
             string ask = Environment.GetEnvironmentVariable("CORE_DEMO_ASK");   // снимок карточки с вопросом об удалении
             if (ask != null && Find(ask) != null) Find(ask).AskRemove();
             States["kapsula.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""autoHide"",""type"":""switch"",""label"":""Автоскрытие"",""hint"":""Остров уезжает за край и возвращается, когда курсор у верхней кромки экрана или есть что показать"",""value"":false},{""key"":""seconds"",""type"":""switch"",""label"":""Секунды в часах"",""hint"":""В капсуле вместо 12:30 будет 12:30:45"",""value"":false},{""key"":""notifications"",""type"":""switch"",""label"":""Уведомления Windows на острове"",""hint"":""Новые уведомления других программ показываются карточкой. Нигде не сохраняются"",""value"":true},{""key"":""rim"",""type"":""switch"",""label"":""Светлая кромка"",""hint"":""Тонкий блик по краю острова — он не сливается с тёмными обоями и окнами"",""value"":true},{""key"":""shadow"",""type"":""switch"",""label"":""Тень под островом"",""hint"":""Мягкая тень: на светлых окнах остров словно парит над ними"",""value"":false}]},{""title"":""Зверёк"",""items"":[{""key"":""eyes"",""type"":""switch"",""label"":""Зверёк в капсуле"",""hint"":""Следит за курсором, пугается таймера, радуется удаче"",""value"":true},{""key"":""walk"",""type"":""switch"",""label"":""Зверёк гуляет по окнам"",""hint"":""Когда остров свёрнут и ничего не происходит, выходит посидеть на краю окна"",""value"":true}]}]}");
@@ -557,6 +606,77 @@ namespace DevTxt.Core
         }
 
         // Рисует окно в файл PNG, не показывая его на экране. scroll — на сколько прокрутить открытую страницу.
+        // Проверка движения: окно показывается по-настоящему, действия проигрываются по очереди на выдуманных
+        // состояниях (сеть и диск не трогаются), а кадры посреди движения и после него складываются в папку.
+        public void MotionTest(string dir, Action done)
+        {
+            System.IO.Directory.CreateDirectory(dir);
+            ShowActivated = false;
+            Show();
+            var plan = new List<KeyValuePair<int, Action>>();
+            int n = 0;
+            Action<int, Action> at = delegate(int wait, Action a) { plan.Add(new KeyValuePair<int, Action>(wait, a)); };
+            Action<int, string> grab = delegate(int wait, string name)
+            {
+                at(wait, delegate
+                {
+                    var bmp = new RenderTargetBitmap((int)W, (int)H, 96, 96, PixelFormats.Pbgra32);
+                    bmp.Render((Visual)Content);
+                    var enc = new PngBitmapEncoder();
+                    enc.Frames.Add(BitmapFrame.Create(bmp));
+                    using (var f = System.IO.File.Create(System.IO.Path.Combine(dir, (++n).ToString("00") + "-" + name + ".png"))) enc.Save(f);
+                });
+            };
+            Card aura = Find("aura"), dockCard = Find("dock"), arkada = Find("arkada");
+
+            // Установщик: шаги
+            at(0, delegate { foreach (var c in Cards) if (c.App.Id == "aura" || c.App.Id == "dock") { c.S.Path = null; c.S.Running = false; } welcome.SetStep(0); ShowPage(PWelcome); });
+            grab(140, "step1-in"); grab(800, "step1");
+            at(0, delegate { welcome.SetStep(1); RenderWelcome(); });
+            grab(140, "step2-in"); grab(800, "step2");
+            // Установщик: ход
+            at(0, delegate { welcome.ShowProgress(new List<string> { "kapsula", "aura", "dock" }, true, false); aura.S.Phase = Phase.Downloading; aura.S.Progress = 0.08; RenderAll(); });
+            grab(140, "run-in"); grab(700, "run");
+            at(0, delegate { aura.S.Progress = 0.7; RenderAll(); });
+            grab(110, "run-bar-moving"); grab(500, "run-bar");
+            at(0, delegate { aura.S.Phase = Phase.Installing; dockCard.S.Phase = Phase.Downloading; dockCard.S.Progress = 0.4; RenderAll(); });
+            grab(450, "run-installing");
+            at(0, delegate { aura.S.Phase = Phase.Idle; aura.S.Path = "demo"; dockCard.S.Phase = Phase.Idle; dockCard.S.Error = "Нет связи с GitHub"; RenderAll(); });
+            grab(120, "run-done-moving"); grab(1300, "run-done");
+            // Окно приложений: вход, установка на карточке, ошибка, успех
+            at(0, delegate { dockCard.S.Error = null; LeaveWelcome(); });
+            grab(140, "apps-in"); grab(900, "apps");
+            at(0, delegate { arkada.S.Phase = Phase.Downloading; arkada.S.Progress = 0.35; RenderAll(); });
+            grab(160, "card-download-in"); grab(600, "card-download");
+            at(0, delegate { arkada.S.Phase = Phase.Installing; RenderAll(); });
+            grab(500, "card-installing");
+            at(0, delegate { arkada.S.Phase = Phase.Idle; arkada.S.Error = "Нет связи с GitHub"; RenderAll(); });
+            grab(120, "card-error-moving"); grab(700, "card-error");
+            at(0, delegate { arkada.S.Error = null; arkada.S.Phase = Phase.Installing; RenderAll(); });
+            at(300, delegate { arkada.S.Phase = Phase.Idle; arkada.S.Path = "demo"; RenderAll(); });
+            grab(150, "card-done-moving"); grab(1300, "card-done");
+            // Вопрос об удалении и вкладки
+            at(0, delegate { aura.AskRemove(); RenderAll(); });
+            grab(120, "remove-ask-in"); grab(500, "remove-ask");
+            at(0, delegate { ShowPage(PSettings); Animate(); });
+            grab(120, "tab-moving"); grab(800, "tab");
+            at(0, delegate { ShowPage(PApps); Animate(); });
+            grab(700, "back");
+            at(0, done);
+
+            int i = 0;
+            var timer = new DispatcherTimer(DispatcherPriority.Background);
+            timer.Tick += delegate
+            {
+                timer.Stop();
+                if (i >= plan.Count) return;
+                plan[i++].Value();
+                if (i < plan.Count) { timer.Interval = TimeSpan.FromMilliseconds(Math.Max(1, plan[i].Key)); timer.Start(); }
+            };
+            timer.Interval = TimeSpan.FromMilliseconds(400);
+            timer.Start();
+        }
+
         public void Shot(string file, double scroll)
         {
             var root = (FrameworkElement)Content;

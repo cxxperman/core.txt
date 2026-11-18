@@ -28,6 +28,12 @@ namespace DevTxt.Core
         readonly Status status = new Status();
         readonly Progress bar;
         string iconPath;
+        // Удаление: сначала вопрос прямо на карточке, с выбором — стирать ли настройки
+        public Action<Card, bool> Remove;
+        public Action Changed;   // карточку надо перерисовать
+        readonly TextBlock removeLink;
+        readonly StackPanel removeRow;
+        bool confirming, withData;
 
         public Card(AppEntry app)
         {
@@ -67,9 +73,23 @@ namespace DevTxt.Core
             Second.Root.Margin = new Thickness(0, 0, 8, 0);
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Children = { Second.Root, Main.Root } };
 
+            // «Удалить» — тихая ссылка в углу: редкое действие не должно спорить с главной кнопкой
+            removeLink = Ui.T("Удалить", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
+            removeLink.HorizontalAlignment = HorizontalAlignment.Left; removeLink.VerticalAlignment = VerticalAlignment.Bottom;
+            removeLink.Margin = new Thickness(0, 0, 0, 7); removeLink.Cursor = System.Windows.Input.Cursors.Hand; removeLink.Background = Brushes.Transparent;
+            removeLink.MouseEnter += delegate { removeLink.Foreground = Ui.Label; };
+            removeLink.MouseLeave += delegate { removeLink.Foreground = Ui.Label3; };
+            removeLink.MouseLeftButtonUp += delegate { confirming = true; withData = false; if (Changed != null) Changed(); };
+
+            var dataLabel = Ui.T("Стереть и настройки", Tokens.Size.Caption, Ui.Label2, FontWeights.Normal);
+            dataLabel.VerticalAlignment = VerticalAlignment.Center; dataLabel.Margin = new Thickness(10, 0, 0, 0);
+            var dataSwitch = new Switch(false, delegate(bool on) { withData = on; });
+            removeRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0), Visibility = Visibility.Collapsed, Children = { dataSwitch.Root, dataLabel } };
+            removeRow.IsVisibleChanged += delegate { if (!removeRow.IsVisible) dataSwitch.Value = false; };
+
             var body = new DockPanel { LastChildFill = true };
-            foreach (FrameworkElement e in new FrameworkElement[] { top, statusRow, note, bar.Root }) { DockPanel.SetDock(e, Dock.Top); body.Children.Add(e); }
-            body.Children.Add(buttons);
+            foreach (FrameworkElement e in new FrameworkElement[] { top, statusRow, note, removeRow, bar.Root }) { DockPanel.SetDock(e, Dock.Top); body.Children.Add(e); }
+            body.Children.Add(new Grid { Children = { removeLink, buttons } });
 
             Root = Ui.Block(body, true);
             Root.Padding = new Thickness(18, 18, 18, 16);
@@ -90,6 +110,9 @@ namespace DevTxt.Core
             tile.Background = img != null ? Ui.Fill : Ui.Tinted(App.Color);
         }
 
+        // Показать вопрос об удалении (для снимков)
+        public void AskRemove() { confirming = true; }
+
         static string V(Version v) { return v.Major + "." + v.Minor + "." + v.Build; }
 
         // Приводит карточку в соответствие с S. Действия кнопок задаёт окно.
@@ -102,8 +125,25 @@ namespace DevTxt.Core
             bar.Root.Visibility = S.Phase == Phase.Downloading ? Visibility.Visible : Visibility.Collapsed;
             bar.Value = S.Progress;
             Second.Hide();
+            if (!S.Installed || busy) confirming = false;
+            removeRow.Visibility = confirming && App.Data != null ? Visibility.Visible : Visibility.Collapsed;
+            removeLink.Visibility = S.Installed && !busy && !confirming && App.Removable ? Visibility.Visible : Visibility.Collapsed;
 
-            if (App.Soon && !S.Installed)
+            if (S.Phase == Phase.Removing)
+            {
+                text = "Удаляется…";
+                dotColor = Tokens.Palette.Red;
+                Main.Set("Удаление…", null, false, null);
+            }
+            else if (confirming)
+            {
+                text = "Удалить " + App.Name.ToLowerInvariant() + ".txt с этого компьютера?";
+                dotColor = Tokens.Palette.Red;
+                if (App.Data == null) hint = App.IsBundle ? "Папки темы и плагина будут убраны из Steam" : "Настройки останутся на месте";
+                Main.Set("Удалить", Tokens.Palette.Red, true, delegate { bool data = withData; confirming = false; if (Remove != null) Remove(this, data); });
+                Second.Set("Отмена", null, true, delegate { confirming = false; if (Changed != null) Changed(); });
+            }
+            else if (App.Soon && !S.Installed)
             {
                 // Ещё не выпущено: честно говорим об этом и не показываем кнопку, которая не сработает
                 text = "В разработке";

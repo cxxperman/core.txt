@@ -26,6 +26,8 @@ namespace DevTxt.Core
         public string Requires, RequiresHint;   // для набора: папка, без которой ставить некуда, и что сказать, если её нет
         public List<BundleTarget> Targets = new List<BundleTarget>();
         public bool HasExe { get { return Kind == "portable" || Kind == "installer"; } }
+        public string Data;   // папка с настройками приложения — её можно стереть вместе с ним, если человек попросит
+        public bool Removable { get { return HasExe || IsBundle; } }
     }
 
     // Часть набора: что из архива (папка «from/») куда положить. Мест может быть несколько — берётся первое,
@@ -73,6 +75,8 @@ namespace DevTxt.Core
         static readonly Regex SafeRepo = new Regex("^" + Owner + "/[A-Za-z0-9._-]{1,100}$");
         static readonly Regex SafeFile = new Regex(@"^[A-Za-z0-9._*-]{1,100}$");
         static readonly Regex SafeFolder = new Regex(@"^[A-Za-z0-9._-]{1,40}/$");
+        // Папка с настройками — только внутри профиля пользователя, без «.» и «..» в пути
+        static readonly Regex SafeData = new Regex(@"^%(APPDATA|LOCALAPPDATA)%(\\(?!\.{1,2}(\\|$))[A-Za-z0-9._-]{1,40}){1,3}$");
         static readonly Regex SafeCommand = new Regex(@"^[a-z][a-z0-9.]{0,40}$");
         // Набор можно класть только внутрь папки Steam: каталог из сети не должен уметь писать куда попало
         static readonly Regex SafeTarget = new Regex(@"^\{steam\}(\\(?!\.{1,2}(\\|$))[A-Za-z0-9._-]{1,40}){1,6}$");   // без «.» и «..» в пути
@@ -147,6 +151,8 @@ namespace DevTxt.Core
                 a.Soon = d.TryGetValue("soon", out soon) && soon is bool && (bool)soon;
                 object rec;
                 a.Recommended = d.TryGetValue("recommended", out rec) && rec is bool && (bool)rec;
+                a.Data = Json.Str(d, "data");
+                if (a.Data != null && !SafeData.IsMatch(a.Data)) a.Data = null;
                 a.Connect = Json.Str(d, "connect");
                 if (a.Connect != null && !SafeCommand.IsMatch(a.Connect)) a.Connect = null;
                 a.Requires = Json.Str(d, "requires");

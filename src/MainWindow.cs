@@ -186,6 +186,8 @@ namespace DevTxt.Core
             foreach (var app in Catalog.Apps)
             {
                 var c = new Card(app);
+                c.Remove = RemoveApp;
+                c.Changed = RenderAll;
                 Cards.Add(c);
                 grid.Children.Add(c.Root);
             }
@@ -512,6 +514,20 @@ namespace DevTxt.Core
             RenderAll();
         }
 
+        async void RemoveApp(Card c, bool withData)
+        {
+            if (c.S.Phase != Phase.Idle || DemoMode) return;
+            var app = c.App;
+            c.S.Error = null;
+            c.S.Phase = Phase.Removing;
+            RenderAll();
+            try { await Task.Run(delegate { AppOps.Uninstall(app, c.S, withData); }); }
+            catch (Exception e) { c.S.Error = e.Message; }
+            c.S.Phase = Phase.Idle;
+            AppOps.Refresh(app, c.S);
+            RenderAll();
+        }
+
         internal void Open(Card c)
         {
             if (DemoMode || c.S.Path == null) return;
@@ -533,6 +549,8 @@ namespace DevTxt.Core
                 else if (c.App.Id == "maska") c.S.Path = "demo";
             }
             // То, что Kapsula присылает на самом деле (см. её CoreHub.cs), здесь — часть списка
+            string ask = Environment.GetEnvironmentVariable("CORE_DEMO_ASK");   // снимок карточки с вопросом об удалении
+            if (ask != null && Find(ask) != null) Find(ask).AskRemove();
             States["kapsula.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""autoHide"",""type"":""switch"",""label"":""Автоскрытие"",""hint"":""Остров уезжает за край и возвращается, когда курсор у верхней кромки экрана или есть что показать"",""value"":false},{""key"":""seconds"",""type"":""switch"",""label"":""Секунды в часах"",""hint"":""В капсуле вместо 12:30 будет 12:30:45"",""value"":false},{""key"":""notifications"",""type"":""switch"",""label"":""Уведомления Windows на острове"",""hint"":""Новые уведомления других программ показываются карточкой. Нигде не сохраняются"",""value"":true},{""key"":""rim"",""type"":""switch"",""label"":""Светлая кромка"",""hint"":""Тонкий блик по краю острова — он не сливается с тёмными обоями и окнами"",""value"":true},{""key"":""shadow"",""type"":""switch"",""label"":""Тень под островом"",""hint"":""Мягкая тень: на светлых окнах остров словно парит над ними"",""value"":false}]},{""title"":""Зверёк"",""items"":[{""key"":""eyes"",""type"":""switch"",""label"":""Зверёк в капсуле"",""hint"":""Следит за курсором, пугается таймера, радуется удаче"",""value"":true},{""key"":""walk"",""type"":""switch"",""label"":""Зверёк гуляет по окнам"",""hint"":""Когда остров свёрнут и ничего не происходит, выходит посидеть на краю окна"",""value"":true}]}]}");
             // То, что Aura присылает на самом деле (см. её app.js, hubSettingsNow)
             States["aura.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""power"",""type"":""switch"",""label"":""Обработка голоса"",""hint"":""Включает и выключает Aura"",""value"":true},{""key"":""preset"",""type"":""choice"",""label"":""Готовый звук"",""value"":""studio"",""options"":[{""value"":""auto"",""label"":""Под вас""},{""value"":""studio"",""label"":""Подкаст""},{""value"":""radio"",""label"":""Эфир""},{""value"":""crystal"",""label"":""Стрим""},{""value"":""velvet"",""label"":""Бархат""},{""value"":""cinema"",""label"":""Кино""},{""value"":""whisper"",""label"":""Чистый""},{""value"":""custom"",""label"":""Свой""}]},{""key"":""mute"",""type"":""switch"",""label"":""Заглушить микрофон"",""hint"":""Тишина для всех программ"",""value"":false},{""key"":""auto"",""type"":""switch"",""label"":""Авто-уровень"",""hint"":""Выравнивает громкость, вытягивает тихий микрофон"",""value"":true},{""key"":""monitor"",""type"":""switch"",""label"":""Слышать себя"",""hint"":""Только в наушниках, иначе будет эхо"",""value"":false}]},{""title"":""Звук"",""items"":[{""key"":""nsEngine"",""type"":""choice"",""label"":""Шумодав"",""value"":""0"",""options"":[{""value"":""0"",""label"":""Обычный""},{""value"":""1"",""label"":""Жёсткий""}]},{""key"":""loudTarget"",""type"":""choice"",""label"":""Громкость на выходе"",""value"":""0"",""options"":[{""value"":""0"",""label"":""Не выравнивать""},{""value"":""-18"",""label"":""−18 LUFS""},{""value"":""-16"",""label"":""−16 LUFS""},{""value"":""-14"",""label"":""−14 LUFS""}]},{""key"":""dehum"",""type"":""switch"",""label"":""Убрать гул сети"",""hint"":""Вырезает 50 Гц и его гармоники — гудение от розетки и плохой земли"",""value"":false}]}]}");

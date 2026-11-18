@@ -8,7 +8,7 @@ using System.Threading;
 
 namespace DevTxt.Core
 {
-    enum Phase { Idle, Downloading, Installing }
+    enum Phase { Idle, Downloading, Installing, Removing }
 
     class AppStatus
     {
@@ -124,6 +124,130 @@ namespace DevTxt.Core
         static bool SamePath(string a, string b)
         {
             try { return string.Equals(System.IO.Path.GetFullPath(a), System.IO.Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase); } catch { return false; }
+        }
+
+        // Убирает записи автозапуска, которые ведут на этот файл
+        static void RemoveAutostart(string path)
+        {
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, true))
+                {
+                    if (k == null) return;
+                    foreach (string name in k.GetValueNames())
+                    {
+                        string target = PathFromCommand(k.GetValue(name) as string);
+                        if (target != null && SamePath(target, path)) k.DeleteValue(name, false);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Папку с настройками можно стереть, только если она лежит внутри профиля пользователя и не есть сам профиль
+        public static bool SafeDataDir(string dir)
+        {
+            if (string.IsNullOrEmpty(dir)) return false;
+            string full;
+            try { full = System.IO.Path.GetFullPath(dir).TrimEnd('\\'); } catch { return false; }
+            foreach (var root in new Environment.SpecialFolder[] { Environment.SpecialFolder.ApplicationData, Environment.SpecialFolder.LocalApplicationData })
+            {
+                string r = Environment.GetFolderPath(root).TrimEnd('\\');
+                if (full.Length > r.Length + 1 && full.StartsWith(r + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
+        // Команда удаления, которую программа оставила Windows: ищем ту, чей деинсталлятор лежит в папке программы
+        public static bool FindUninstaller(string installDir, out string exe, out string args)
+        {
+            exe = null; args = null;
+            try
+            {
+                using (var root = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall"))
+                {
+                    if (root == null) return false;
+                    foreach (string name in root.GetSubKeyNames())
+                        using (var k = root.OpenSubKey(name))
+                        {
+                            if (k == null) continue;
+                            string quiet = k.GetValue("QuietUninstallString") as string, plain = k.GetValue("UninstallString") as string;
+                            string command = quiet ?? plain;
+                            string path = PathFromCommand(command);
+                            if (path == null || !File.Exists(path) || !SamePath(System.IO.Path.GetDirectoryName(path), installDir)) continue;
+                            if (SplitCommand(command, out exe, out args))
+                            {
+                                if (quiet == null) args = (args + " /S").Trim();   // тихий ключ установщиков этого вида
+                                return true;
+                            }
+                        }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        public static bool SplitCommand(string command, out string exe, out string args)
+        {
+            exe = PathFromCommand(command); args = "";
+            if (exe == null) return false;
+            int at = command.IndexOf(exe, StringComparison.OrdinalIgnoreCase) + exe.Length;
+            args = command.Substring(at).TrimStart('"').Trim();
+            return true;
+        }
+
+        // Убирает приложение с компьютера. withData — стереть и его настройки (только если каталог знает, где они).
+        public static void Uninstall(AppEntry app, AppStatus s, bool withData)
+        {
+            if (!s.Installed) return;
+            if (app.IsBundle)
+            {
+                // Набор: убираются папки, в которые он раскладывался — они целиком наши
+                foreach (var t in app.Targets)
+                    foreach (string to in t.To)
+                    {
+                        string dir = Expand(to);
+                        try { if (dir != null && Directory.Exists(dir)) Directory.Delete(dir, true); }
+                        catch { throw new Exception("Не удалось убрать папку — закройте Steam и попробуйте ещё раз"); }
+                    }
+                return;
+            }
+            string path = s.Path;
+            if (app.Kind == "installer")
+            {
+                // Удаляет собственный деинсталлятор программы, как это делает Windows: он знает, что ещё она оставила в системе
+                string exe, args;
+                if (!FindUninstaller(System.IO.Path.GetDirectoryName(path), out exe, out args)) throw new Exception("Не найден деинсталлятор — удалите через «Параметры Windows → Приложения»");
+                using (var p = Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = true }))
+                    if (p != null) p.WaitForExit(120000);
+                // Такой деинсталлятор сразу перезапускает себя из временной папки, поэтому ждём не его, а исчезновения программы
+                for (int i = 0; i < 240 && File.Exists(path); i++) Thread.Sleep(500);
+                if (File.Exists(path)) throw new Exception("Деинсталлятор не закончил работу — проверьте, не ждёт ли он вашего ответа");
+            }
+            else
+            {
+                CloseRunning(app, path);
+                Exception last = null;
+                for (int i = 0; i < 20; i++)   // файл освобождается не мгновенно
+                {
+                    try { File.Delete(path); last = null; break; }
+                    catch (Exception e) { last = e; Thread.Sleep(250); }
+                }
+                if (last != null) throw new Exception("Не удалось удалить файл программы: " + (last is UnauthorizedAccessException ? "нет прав на её папку" : "он занят"));
+                Releases.TryDelete(path + ".old");
+                try { string dir = System.IO.Path.GetDirectoryName(path); if (Directory.GetFileSystemEntries(dir).Length == 0) Directory.Delete(dir); } catch { }
+                RemoveAutostart(path);
+                Shortcuts.Remove(app.Name);
+            }
+            State.Paths.Remove(app.Id);
+            State.Save();
+            if (withData && app.Data != null)
+            {
+                string data = Expand(app.Data);
+                if (!SafeDataDir(data)) throw new Exception("Программа удалена, но папку с настройками трогать небезопасно — она осталась на месте");
+                try { if (Directory.Exists(data)) Directory.Delete(data, true); }
+                catch { throw new Exception("Программа удалена, но часть настроек занята и осталась на месте"); }
+            }
         }
 
         // Стоит не в общем доме — можно перенести. Только для переносных: то, что ставил установщик, остаётся на его месте.
@@ -375,6 +499,12 @@ namespace DevTxt.Core
         public static string Folder
         {
             get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "dev.txt"); }
+        }
+
+        public static void Remove(string name)
+        {
+            if (AppOps.HomeOverride != null) return;
+            Releases.TryDelete(System.IO.Path.Combine(Folder, name.ToLowerInvariant() + ".txt.lnk"));
         }
 
         public static void Add(string name, string target)

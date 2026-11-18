@@ -6,6 +6,7 @@
 //   --tray              запуститься без окна, только значок в трее и хаб
 //   --selftest          проверить разбор каталога, ответа GitHub и замену файла; код выхода 0 — всё в порядке
 //   --hub порт          запустить только хаб на этом порту, без окна (для проверок из kit.txt)
+//   --uninstall имя     удалить приложение без окна; настройки остаются
 //   --install имя       поставить или обновить приложение из каталога без окна и напечатать, чем кончилось
 //   --latest            спросить у GitHub последние версии приложений из каталога и напечатать их
 //   --fetch адрес сумма размер   скачать файл с проверкой размера и SHA-256 (для проверки на своём компьютере)
@@ -33,6 +34,7 @@ namespace DevTxt.Core
             if (Array.IndexOf(args, "--selftest") >= 0) return SelfTest.Run();
             if (Array.IndexOf(args, "--latest") >= 0) return SelfTest.Latest();
             for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "--install") return SelfTest.InstallNow(args[i + 1]);
+            for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "--uninstall") return SelfTest.UninstallNow(args[i + 1]);
             for (int i = 0; i + 1 < args.Length; i++)
                 if (args[i] == "--hub")
                 {
@@ -159,6 +161,43 @@ namespace DevTxt.Core
                 Check(AppOps.ReplacePath("\"c:\\old\\Kapsula.exe\" --wait", "C:\\Old\\Kapsula.exe", "D:\\new\\Kapsula.exe") == "\"D:\\new\\Kapsula.exe\" --wait", "an autostart entry follows the program to its new place");
             }
 
+            // Удаление: программа уходит вместе с пустой папкой; настройки — только по просьбе и только из профиля
+            {
+                string home = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-remove-" + System.Diagnostics.Process.GetCurrentProcess().Id);
+                AppOps.HomeOverride = System.IO.Path.Combine(home, "dev.txt");
+                try
+                {
+                    string exe = System.IO.Path.Combine(AppOps.HomeOverride, "One", "One.exe"), data = System.IO.Path.Combine(home, "data");
+                    var one = new AppEntry { Id = "selftest-remove", Name = "One", Kind = "portable", Exe = "One.exe", Process = "CoreTxtNoSuchProcess", Data = data };
+                    Action seed = delegate
+                    {
+                        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(exe)); System.IO.File.WriteAllText(exe, "app");
+                        System.IO.Directory.CreateDirectory(System.IO.Path.Combine(data, "deep")); System.IO.File.WriteAllText(System.IO.Path.Combine(data, "deep", "settings.txt"), "x");
+                    };
+                    seed();
+                    AppOps.Uninstall(one, new AppStatus { Path = exe }, false);
+                    Check(!System.IO.File.Exists(exe) && !System.IO.Directory.Exists(System.IO.Path.GetDirectoryName(exe)), "the program and its empty folder are removed");
+                    Check(System.IO.File.Exists(System.IO.Path.Combine(data, "deep", "settings.txt")), "settings stay unless asked");
+                    seed();
+                    AppOps.Uninstall(one, new AppStatus { Path = exe }, true);
+                    Check(!System.IO.Directory.Exists(data), "settings are erased when asked");
+                    AppOps.Uninstall(one, new AppStatus(), true);   // не установлено — ничего не делает и не падает
+                }
+                finally { AppOps.HomeOverride = null; try { System.IO.Directory.Delete(home, true); } catch { } }
+
+                string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                Check(AppOps.SafeDataDir(System.IO.Path.Combine(roaming, "Kapsula")) && !AppOps.SafeDataDir(roaming) && !AppOps.SafeDataDir(roaming + "\\") && !AppOps.SafeDataDir("C:\\") && !AppOps.SafeDataDir("C:\\Windows\\Temp") && !AppOps.SafeDataDir(System.IO.Path.Combine(roaming, "..", "..", "Documents")) && !AppOps.SafeDataDir(""), "only a folder inside the user's profile may be erased as settings");
+                var withData = Catalog.Read(@"{ ""apps"": [
+                    { ""id"": ""a"", ""name"": ""A"", ""kind"": ""portable"", ""repo"": ""cxxperman/a"", ""asset"": ""A.exe"", ""exe"": ""A.exe"", ""data"": ""%APPDATA%\\dev.txt\\a"" },
+                    { ""id"": ""b"", ""name"": ""B"", ""kind"": ""portable"", ""repo"": ""cxxperman/b"", ""asset"": ""B.exe"", ""exe"": ""B.exe"", ""data"": ""%APPDATA%"" },
+                    { ""id"": ""c"", ""name"": ""C"", ""kind"": ""portable"", ""repo"": ""cxxperman/c"", ""asset"": ""C.exe"", ""exe"": ""C.exe"", ""data"": ""%USERPROFILE%\\Documents"" },
+                    { ""id"": ""d"", ""name"": ""D"", ""kind"": ""portable"", ""repo"": ""cxxperman/d"", ""asset"": ""D.exe"", ""exe"": ""D.exe"", ""data"": ""%APPDATA%\\..\\x"" }
+                ] }");
+                Check(withData.Count == 4 && withData[0].Data != null && withData[1].Data == null && withData[2].Data == null && withData[3].Data == null, "the catalogue may name a settings folder only inside the profile");
+                string ux, ua;
+                Check(AppOps.SplitCommand("\"C:\\P\\Uninstall Aura.exe\" /currentuser /S", out ux, out ua) && ux == "C:\\P\\Uninstall Aura.exe" && ua == "/currentuser /S", "an uninstall command is split into the program and its arguments");
+            }
+
             // Набор (тема и плагин для Steam): принимается только в папку Steam и раскладывается строго по своим местам
             {
                 var bundles = Catalog.Read(@"{ ""apps"": [
@@ -255,6 +294,7 @@ namespace DevTxt.Core
             try
             {
                 string target = System.IO.Path.Combine(dir, "app", "One.exe"), fresh = System.IO.Path.Combine(dir, "download.exe");
+                AppOps.HomeOverride = dir;   // проверка не должна оставлять ярлыков в настоящем меню «Пуск»
                 var one = new AppEntry { Id = "selftest-one", Name = "One", Kind = "portable", Exe = "One.exe", Process = "CoreTxtNoSuchProcess" };
                 System.IO.File.WriteAllText(fresh, "new");
                 AppOps.Install(one, new AppStatus { Path = target }, fresh);
@@ -265,7 +305,7 @@ namespace DevTxt.Core
                 Check(System.IO.Directory.GetFiles(System.IO.Path.GetDirectoryName(target)).Length == 1 && !System.IO.File.Exists(fresh), "nothing is left behind");
                 State.Paths.Remove("selftest-one");
             }
-            finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+            finally { AppOps.HomeOverride = null; try { System.IO.Directory.Delete(dir, true); } catch { } }
 
             Console.WriteLine(failed == 0 ? "all passed" : failed + " failed");
             return failed == 0 ? 0 : 1;
@@ -293,6 +333,7 @@ namespace DevTxt.Core
         // То же, что кнопка «Установить» или «Обновить» на карточке, только без окна
         public static int InstallNow(string id)
         {
+            try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
             State.Load();
             Catalog.Load();
             AppEntry app = Catalog.Apps.Find(delegate(AppEntry a) { return a.Id == id; });
@@ -310,6 +351,28 @@ namespace DevTxt.Core
                 AppOps.Refresh(app, s);
                 Console.WriteLine("стало: " + (s.Installed ? (s.Version == null ? "установлено" : s.Version.ToString()) + " — " + s.Path : "не установлено"));
                 return s.Installed ? 0 : 4;
+            }
+            catch (Exception e) { Console.WriteLine("не получилось: " + e.Message); return 1; }
+        }
+
+        // То же, что «Удалить» на карточке без галочки «Стереть и настройки»
+        public static int UninstallNow(string id)
+        {
+            try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
+            State.Load();
+            Catalog.Load();
+            AppEntry app = Catalog.Apps.Find(delegate(AppEntry a) { return a.Id == id; });
+            if (app == null || !app.Removable) { Console.WriteLine("нет такого приложения в каталоге: " + id); return 2; }
+            try
+            {
+                var s = new AppStatus();
+                AppOps.Refresh(app, s);
+                if (!s.Installed) { Console.WriteLine("не установлено"); return 0; }
+                Console.WriteLine("было: " + s.Path);
+                AppOps.Uninstall(app, s, false);
+                AppOps.Refresh(app, s);
+                Console.WriteLine("стало: " + (s.Installed ? "всё ещё установлено — " + s.Path : "не установлено"));
+                return s.Installed ? 4 : 0;
             }
             catch (Exception e) { Console.WriteLine("не получилось: " + e.Message); return 1; }
         }

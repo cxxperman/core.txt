@@ -118,7 +118,7 @@ namespace DevTxt.Core
             title.Margin = new Thickness(10, 0, 0, 2); title.VerticalAlignment = VerticalAlignment.Center;
             header.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(32, 22, 0, 0), VerticalAlignment = VerticalAlignment.Center, Children = { mark, title } });
 
-            tabs = new Seg(new string[] { "Приложения", "Сценарии", "Настройки" }, Math.Min(page, PSettings), delegate(int i) { ShowPage(i); });
+            tabs = new Seg(new string[] { "Приложения", "Сценарии", "Настройки" }, Math.Min(page, PSettings), delegate(int i) { ShowPage(i); Animate(); });
             tabs.Root.HorizontalAlignment = HorizontalAlignment.Right; tabs.Root.VerticalAlignment = VerticalAlignment.Center;
             tabs.Root.Margin = new Thickness(0, 24, 32, 0);
             header.Children.Add(tabs.Root);
@@ -168,6 +168,14 @@ namespace DevTxt.Core
             settings.Root.Visibility = i == PSettings ? Visibility.Visible : Visibility.Collapsed;
             welcome.Root.Visibility = first ? Visibility.Visible : Visibility.Collapsed;
             RenderAll();
+        }
+
+        // Волна при переходе на страницу
+        void Animate()
+        {
+            if (page == PApps) Motion.Stagger(grid);
+            else if (page == PScenarios) scenariosPage.Animate();
+            else if (page == PSettings) settings.Animate();
         }
 
         void BuildCards()

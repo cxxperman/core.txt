@@ -53,7 +53,7 @@
     {
       "id": "dock",
       "name": "Dock",
-      "tagline": "Док для Windows: закреплённые и запущенные программы",
+      "tagline": "Док для Windows: программы, виджеты и меню приложений",
       "color": "#30D158",
       "kind": "portable",
       "repo": "cxxperman/dock.txt",
@@ -62,6 +62,32 @@
       "process": "Dock",
       "soon": true,
       "sprite": ["....####....", "....#E##....", ".##.#E##.##.", ".##.####.##.", ".##.####.##.", "............", "############", ".##########."]
+    },
+    {
+      "id": "smena",
+      "name": "Smena",
+      "tagline": "Свой Alt+Tab с живыми превью окон",
+      "color": "#8A5CF6",
+      "kind": "portable",
+      "repo": "cxxperman/smena.txt",
+      "asset": "Smena.exe",
+      "exe": "Smena.exe",
+      "process": "Smena",
+      "soon": true,
+      "sprite": ["#######.....", "#######.....", "##..........", "##.#########", "##.##E###E##", "##.##E###E##", "...#########", "...#########"]
+    },
+    {
+      "id": "metla",
+      "name": "Metla",
+      "tagline": "Аккуратная уборка: временные файлы, автозапуск, программы",
+      "color": "#FF9F0A",
+      "kind": "portable",
+      "repo": "cxxperman/metla.txt",
+      "asset": "Metla.exe",
+      "exe": "Metla.exe",
+      "process": "Metla",
+      "soon": true,
+      "sprite": [".......##.", "......##..", ".....##...", "....##....", "...##.....", "..####....", ".######...", ".##E###...", "###E####..", "########..", "#.#.#.#.#.", "#.#.#.#.#."]
     }
   ]
 }

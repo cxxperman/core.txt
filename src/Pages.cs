@@ -21,6 +21,9 @@ namespace DevTxt.Core
             Root = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Padding = new Thickness(25, 0, 25, 0), Content = stack, Focusable = false, Visibility = Visibility.Collapsed };
         }
 
+        // Появление страницы: строки поднимаются волной. Только по действию человека, не при каждом обновлении.
+        public void Animate() { Motion.Stagger(stack); }
+
         protected void Title(string text)
         {
             var t = Ui.T(text, Tokens.Size.Heading, Ui.Label2, FontWeights.SemiBold);

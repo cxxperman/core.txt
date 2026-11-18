@@ -382,6 +382,7 @@ namespace DevTxt.Core
                 Console.WriteLine("было: " + s.Path);
                 AppOps.Uninstall(app, s, false);
                 AppOps.Refresh(app, s);
+                InstalledApps.Sync(app, s);   // удалили из «Параметров» Windows — запись там тоже убирается
                 Console.WriteLine("стало: " + (s.Installed ? "всё ещё установлено — " + s.Path : "не установлено"));
                 return s.Installed ? 4 : 0;
             }

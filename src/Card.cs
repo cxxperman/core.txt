@@ -163,7 +163,7 @@ namespace DevTxt.Core
                 if (S.Installed) dotColor = Tokens.Palette.Green;
                 hint = S.Installed ? "" : App.Hint;
                 // Подключить можно прямо отсюда, если приложение, которое это делает, сейчас на связи
-                if (!S.Installed && App.Connect != null && via != null && connected(via.App.Id)) Main.Set("Подключить", App.Color, true, delegate { connect(this); });
+                if (!S.Installed && App.Connect != null && via != null && connected(via.App.Id)) Main.Set("Подключить", Ui.Accent, true, delegate { connect(this); });
                 else if (via != null && via.S.Installed) Main.Set("Открыть " + via.App.Name.ToLowerInvariant() + ".txt", null, true, delegate { open(via); });
                 else if (via != null) Main.Set("Нужна " + via.App.Name.ToLowerInvariant() + ".txt", null, false, null);
                 else Main.Hide();
@@ -183,7 +183,7 @@ namespace DevTxt.Core
             else if (!S.Installed)
             {
                 text = S.Latest != null ? "Не установлено · версия " + V(S.Latest.Version) : "Не установлено";
-                Main.Set("Установить", App.Color, true, delegate { install(this); });
+                Main.Set("Установить", Ui.Accent, true, delegate { install(this); });
             }
             else
             {
@@ -194,7 +194,7 @@ namespace DevTxt.Core
                 {
                     hint = "Есть обновление " + V(S.Latest.Version) + (S.Running ? " — приложение перезапустится" : "");
                     dotColor = Tokens.Palette.Orange;
-                    Main.Set("Обновить", App.Color, true, delegate { install(this); });
+                    Main.Set("Обновить", Ui.Accent, true, delegate { install(this); });
                     if (App.HasExe) Second.Set("Открыть", null, true, delegate { open(this); });
                 }
                 else if (App.HasExe) Main.Set("Открыть", null, true, delegate { open(this); });

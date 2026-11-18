@@ -56,8 +56,10 @@ namespace DevTxt.Core
             page = !demo && !State.Onboarded ? PWelcome : startPage;
             Title = "core.txt";
             Width = W; Height = H;
-            WindowStyle = WindowStyle.None;
-            ResizeMode = ResizeMode.CanMinimize;
+            MinWidth = W; MinHeight = 520;
+            // Родное окно Windows 11: системная рамка и тень, Mica, тема Windows, размер меняется, окно прилипает к краям
+            Ui.ThemeFollows = !demo;
+            Ui.Native(this, true);
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = Ui.Bg;
             FontFamily = Ui.TextFont;
@@ -75,13 +77,6 @@ namespace DevTxt.Core
             BuildCards();
             ShowPage(page);
 
-            SourceInitialized += delegate
-            {
-                IntPtr hwnd = new WindowInteropHelper(this).Handle;
-                int round = 2, dark = 1;   // скруглённые углы и тёмная рамка окна в Windows 11
-                DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int));
-                DwmSetWindowAttribute(hwnd, 20, ref dark, sizeof(int));
-            };
             if (demo) return;
 
             StartHub();
@@ -112,7 +107,7 @@ namespace DevTxt.Core
         // ───────── Разметка ─────────
         FrameworkElement Build()
         {
-            var root = new Grid { Background = Ui.Bg, Width = W, Height = H, ClipToBounds = true };
+            var root = new Grid { Background = Ui.Bg, ClipToBounds = true };
             root.Children.Add(Ui.Backdrop());
             var layout = new DockPanel { LastChildFill = true };
             root.Children.Add(layout);
@@ -128,13 +123,10 @@ namespace DevTxt.Core
 
             tabs = new Seg(new string[] { "Приложения", "Сценарии", "Настройки" }, Math.Min(page, PSettings), delegate(int i) { ShowPage(i); Animate(); });
             tabs.Root.HorizontalAlignment = HorizontalAlignment.Right; tabs.Root.VerticalAlignment = VerticalAlignment.Center;
-            tabs.Root.Margin = new Thickness(0, 24, 32, 0);
+            tabs.Root.Margin = new Thickness(0, 30, 32, 0);
             header.Children.Add(tabs.Root);
 
-            var controls = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 6, 8, 0) };
-            controls.Children.Add(WindowButton("", "Свернуть", false, delegate { WindowState = WindowState.Minimized; }));
-            controls.Children.Add(WindowButton("", "Закрыть", true, delegate { Close(); }));
-            header.Children.Add(controls);
+            header.Children.Add(Ui.CaptionButtons(this, Close));   // кнопки окна как у Windows 11
             DockPanel.SetDock(header, Dock.Top);
             layout.Children.Add(header);
 
@@ -206,7 +198,7 @@ namespace DevTxt.Core
                 Cards.Add(c);
                 grid.Children.Add(c.Root);
             }
-            if (DemoMode) Demo(); else foreach (var c in Cards) AppOps.Refresh(c.App, c.S);
+            if (DemoMode) Demo(); else foreach (var c in Cards) { AppOps.Refresh(c.App, c.S); InstalledApps.Sync(c.App, c.S); }
         }
 
         Card Find(string id) { return Cards.Find(delegate(Card c) { return c.App.Id == id; }); }
@@ -425,15 +417,19 @@ namespace DevTxt.Core
         {
             try
             {
-                var menu = new System.Windows.Forms.ContextMenuStrip();
-                menu.Items.Add("Открыть core.txt", null, delegate { ShowWindow(); });
-                menu.Items.Add("Выход", null, delegate { Quit(); });
                 tray = new System.Windows.Forms.NotifyIcon
                 {
                     Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location),
-                    Text = "core.txt", ContextMenuStrip = menu, Visible = true
+                    Text = "core.txt", Visible = true
                 };
                 tray.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e) { if (e.Button == System.Windows.Forms.MouseButtons.Left) ShowWindow(); };
+                tray.BalloonTipClicked += delegate { ShowWindow(); };   // щелчок по уведомлению открывает core.txt
+                // Меню Windows 11, а не серое меню WinForms
+                tray.MouseUp += delegate(object s, System.Windows.Forms.MouseEventArgs e)
+                {
+                    if (e.Button != System.Windows.Forms.MouseButtons.Right) return;
+                    NativeMenu.Show(new NativeMenu.Item("Открыть core.txt", ShowWindow), new NativeMenu.Item("Проверить обновления", delegate { ShowWindow(); CheckAll(); }), NativeMenu.Item.Separator, new NativeMenu.Item("Выход", Quit));
+                };
             }
             catch { tray = null; }
         }
@@ -457,7 +453,7 @@ namespace DevTxt.Core
         void RefreshLocal()
         {
             if (!IsVisible) return;
-            foreach (var c in Cards) if (c.S.Phase == Phase.Idle) AppOps.Refresh(c.App, c.S);
+            foreach (var c in Cards) if (c.S.Phase == Phase.Idle) { AppOps.Refresh(c.App, c.S); InstalledApps.Sync(c.App, c.S); }
             if (page == PApps) RenderAll();
         }
 
@@ -487,6 +483,8 @@ namespace DevTxt.Core
             if (any) { State.Checked = DateTime.UtcNow; State.Save(); }
             checking = false;
             RenderAll();
+            int updates = Cards.FindAll(delegate(Card c) { return c.S.UpdateAvailable; }).Count + (SelfUpdate.Available ? 1 : 0);
+            if (updates > 0) Notify("Есть обновления: " + updates, "Откройте core.txt, чтобы обновить");
         }
 
         async void UpdateSelf()
@@ -535,8 +533,21 @@ namespace DevTxt.Core
             catch (Exception e) { c.S.Error = e.Message; }
             c.S.Phase = Phase.Idle;
             AppOps.Refresh(app, c.S);
+            InstalledApps.Sync(app, c.S);
             RenderAll();
+            // Окно спрятано — о готовой установке скажет уведомление Windows
+            if (c.S.Error == null && c.S.Installed) Notify(app.Name.ToLowerInvariant() + ".txt установлено", "Открыть можно из core.txt или из меню «Пуск»");
+            else if (c.S.Error != null) Notify("Не удалось установить " + app.Name.ToLowerInvariant() + ".txt", c.S.Error);
         }
+
+        // Уведомление Windows — только когда окна core.txt не видно: при открытом окне всё и так на экране
+        internal void Notify(string title, string text)
+        {
+            if (tray == null || DemoMode || IsVisible && IsActive) return;
+            try { tray.ShowBalloonTip(6000, title, text, System.Windows.Forms.ToolTipIcon.None); } catch { }
+        }
+
+        internal void InstallId(string id) { Card c = Find(id); if (c != null) Install(c); }
 
         // Можно ли поставить это прямо сейчас одним щелчком
         bool Installable(Card c)
@@ -561,6 +572,7 @@ namespace DevTxt.Core
             catch (Exception e) { c.S.Error = e.Message; }
             c.S.Phase = Phase.Idle;
             AppOps.Refresh(app, c.S);
+            InstalledApps.Sync(app, c.S);
             RenderAll();
         }
 
@@ -583,6 +595,7 @@ namespace DevTxt.Core
                 if (c.App.Id == "kapsula") { c.S.Path = "demo"; c.S.Version = new Version(0, 7, 5); c.S.Running = true; c.S.Latest = new Release { Version = new Version(0, 7, 6) }; }
                 else if (c.App.Id == "aura") { c.S.Path = "demo"; c.S.Version = new Version(0, 26, 2); c.S.Running = true; }
                 else if (c.App.Id == "maska") c.S.Path = "demo";
+                else if (c.App.Id == "dock" || c.App.Id == "smena") { c.S.Path = "demo"; c.S.Version = new Version(0, 1, 2); c.S.Running = true; }
             }
             // То, что Kapsula присылает на самом деле (см. её CoreHub.cs), здесь — часть списка
             string demoStep = Environment.GetEnvironmentVariable("CORE_DEMO_STEP");   // снимок нужного шага установщика
@@ -602,6 +615,8 @@ namespace DevTxt.Core
             if (ask != null && Find(ask) != null) Find(ask).AskRemove();
             States["kapsula.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""autoHide"",""type"":""switch"",""label"":""Автоскрытие"",""hint"":""Остров уезжает за край и возвращается, когда курсор у верхней кромки экрана или есть что показать"",""value"":false},{""key"":""seconds"",""type"":""switch"",""label"":""Секунды в часах"",""hint"":""В капсуле вместо 12:30 будет 12:30:45"",""value"":false},{""key"":""notifications"",""type"":""switch"",""label"":""Уведомления Windows на острове"",""hint"":""Новые уведомления других программ показываются карточкой. Нигде не сохраняются"",""value"":true},{""key"":""rim"",""type"":""switch"",""label"":""Светлая кромка"",""hint"":""Тонкий блик по краю острова — он не сливается с тёмными обоями и окнами"",""value"":true},{""key"":""shadow"",""type"":""switch"",""label"":""Тень под островом"",""hint"":""Мягкая тень: на светлых окнах остров словно парит над ними"",""value"":false}]},{""title"":""Зверёк"",""items"":[{""key"":""eyes"",""type"":""switch"",""label"":""Зверёк в капсуле"",""hint"":""Следит за курсором, пугается таймера, радуется удаче"",""value"":true},{""key"":""walk"",""type"":""switch"",""label"":""Зверёк гуляет по окнам"",""hint"":""Когда остров свёрнут и ничего не происходит, выходит посидеть на краю окна"",""value"":true}]}]}");
             // То, что Aura присылает на самом деле (см. её app.js, hubSettingsNow)
+            States["dock.settings"] = Json.Parse(@"{""groups"":[{""title"":""Панель задач"",""items"":[{""key"":""bar"",""type"":""choice"",""label"":""Внизу экрана"",""hint"":""dock.txt — панель задач Windows прячется. Компактная панель Windows — тонкая полоса с часами"",""value"":""dock"",""options"":[{""value"":""dock"",""label"":""dock.txt""},{""value"":""modern"",""label"":""Компактная панель Windows""},{""value"":""both"",""label"":""dock.txt и панель Windows""}]},{""key"":""winKey"",""type"":""switch"",""label"":""Кнопка Windows открывает меню дока"",""hint"":""Вместо «Пуска» — меню приложений dock.txt. Сочетания вроде Win+E работают как обычно"",""value"":true}]}]}");
+            States["smena.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""replace"",""type"":""switch"",""label"":""Заменять Alt+Tab"",""hint"":""Вместо системного переключателя окон открывается этот"",""value"":true}]}]}");
             States["aura.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""power"",""type"":""switch"",""label"":""Обработка голоса"",""hint"":""Включает и выключает Aura"",""value"":true},{""key"":""preset"",""type"":""choice"",""label"":""Готовый звук"",""value"":""studio"",""options"":[{""value"":""auto"",""label"":""Под вас""},{""value"":""studio"",""label"":""Подкаст""},{""value"":""radio"",""label"":""Эфир""},{""value"":""crystal"",""label"":""Стрим""},{""value"":""velvet"",""label"":""Бархат""},{""value"":""cinema"",""label"":""Кино""},{""value"":""whisper"",""label"":""Чистый""},{""value"":""custom"",""label"":""Свой""}]},{""key"":""mute"",""type"":""switch"",""label"":""Заглушить микрофон"",""hint"":""Тишина для всех программ"",""value"":false},{""key"":""auto"",""type"":""switch"",""label"":""Авто-уровень"",""hint"":""Выравнивает громкость, вытягивает тихий микрофон"",""value"":true},{""key"":""monitor"",""type"":""switch"",""label"":""Слышать себя"",""hint"":""Только в наушниках, иначе будет эхо"",""value"":false}]},{""title"":""Звук"",""items"":[{""key"":""nsEngine"",""type"":""choice"",""label"":""Шумодав"",""value"":""0"",""options"":[{""value"":""0"",""label"":""Обычный""},{""value"":""1"",""label"":""Жёсткий""}]},{""key"":""loudTarget"",""type"":""choice"",""label"":""Громкость на выходе"",""value"":""0"",""options"":[{""value"":""0"",""label"":""Не выравнивать""},{""value"":""-18"",""label"":""−18 LUFS""},{""value"":""-16"",""label"":""−16 LUFS""},{""value"":""-14"",""label"":""−14 LUFS""}]},{""key"":""dehum"",""type"":""switch"",""label"":""Убрать гул сети"",""hint"":""Вырезает 50 Гц и его гармоники — гудение от розетки и плохой земли"",""value"":false}]}]}");
         }
 

@@ -125,6 +125,42 @@ namespace DevTxt.Core
             // Вид настройки, которого эта версия core.txt не знает, пропускается
         }
 
+        // Одна замена: настройка самого приложения под понятным названием; приложения нет — «Установить», не запущено — «Открыть»
+        void Replacement(string what, string appId, string key)
+        {
+            Card card = w.Cards.Find(delegate(Card c) { return c.App.Id == appId; });
+            if (card == null) return;
+            string name = card.App.Name.ToLowerInvariant() + ".txt";
+            if (!card.S.Installed)
+            {
+                var b = new Btn();
+                b.Set("Установить", Ui.Accent, card.S.Phase == Phase.Idle, delegate { w.InstallId(appId); });
+                Row(what, "Заменяет " + name + ". Пока его нет, работает то, что в Windows", b.Root);
+                return;
+            }
+            object data;
+            w.States.TryGetValue(appId + ".settings", out data);
+            Dictionary<string, object> found = null;
+            var settings = data as Dictionary<string, object>;
+            if (settings != null)
+                foreach (object g in Json.List(settings, "groups"))
+                    foreach (object o in Json.List(g as Dictionary<string, object>, "items"))
+                    {
+                        var it = o as Dictionary<string, object>;
+                        if (it != null && Json.Str(it, "key") == key) found = it;
+                    }
+            if (found == null)
+            {
+                var b = new Btn();
+                b.Set("Открыть " + name, null, true, delegate { w.Open(card); });
+                Row(what, name + " не запущен — пока он закрыт, работает то, что в Windows", b.Root);
+                return;
+            }
+            var copy = new Dictionary<string, object>(found);
+            copy["label"] = what + " — " + name;
+            Item(card.App, copy);
+        }
+
         // ───────── Вся страница заново — по текущему состоянию ─────────
         public void Render()
         {
@@ -134,6 +170,12 @@ namespace DevTxt.Core
             Title("Вид");
             Row("Акцентный цвет", "Один цвет для всех приложений — или свой у каждого", Swatches());
             Row("Меньше движения", "Без пружин и плавных переходов во всех приложениях", new Switch(State.ReducedMotion, delegate(bool on) { w.SetTheme(null, on); }).Root);
+
+            // Что из Windows заменяют приложения dev.txt. Каждая замена выключается — и Windows возвращается как была.
+            Title("Что заменено в Windows");
+            Replacement("Панель задач", "dock", "bar");
+            Replacement("Кнопка «Пуск»", "dock", "winKey");
+            Replacement("Переключение окон Alt+Tab", "smena", "replace");
 
             Title("Запуск");
             Row("Запускать core.txt вместе с Windows", "Тихо, в трее: приложения сразу видят друг друга и общие настройки", new Switch(w.DemoMode ? true : Autostart.Enabled, delegate(bool on) { if (!w.DemoMode) Autostart.Set(on); }).Root);

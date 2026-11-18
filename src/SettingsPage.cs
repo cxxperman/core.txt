@@ -161,21 +161,49 @@ namespace DevTxt.Core
             Item(card.App, copy);
         }
 
-        // ───────── Вся страница заново — по текущему состоянию ─────────
+        // Какой раздел показан: «general», «replace» или «app:<id>»
+        public string Section = "general";
+        string shownSection;
+
+        // Пока человек только что нажал переключатель, страницу не перестраиваем: иначе ответ приложения
+        // приходит посреди движения бегунка, и тот прыгает на место вместо того, чтобы доехать.
+        DateTime touched = DateTime.MinValue;
+        System.Windows.Threading.DispatcherTimer later;
+        bool hooked;
+
+        // ───────── Раздел заново — по текущему состоянию ─────────
         public void Render()
         {
-            double offset = Root.VerticalOffset;
+            if (!hooked)
+            {
+                hooked = true;
+                Root.PreviewMouseLeftButtonDown += delegate { touched = DateTime.UtcNow; };
+                Root.PreviewKeyDown += delegate { touched = DateTime.UtcNow; };
+            }
+            double wait = 400 - (DateTime.UtcNow - touched).TotalMilliseconds;
+            if (wait > 0 && shownSection == Section)
+            {
+                if (later == null) { later = new System.Windows.Threading.DispatcherTimer(); later.Tick += delegate { later.Stop(); Render(); }; }
+                later.Stop(); later.Interval = TimeSpan.FromMilliseconds(wait); later.Start();
+                return;
+            }
+            double offset = shownSection == Section ? Root.VerticalOffset : 0;
+            shownSection = Section;
             stack.Children.Clear();
+            if (Section == "replace")
+            {
+                Replacement("Панель задач", "dock", "bar");
+                Replacement("Кнопка «Пуск»", "dock", "winKey");
+                Replacement("Переключение окон Alt+Tab", "smena", "replace");
+                Root.ScrollToVerticalOffset(offset);
+                return;
+            }
+            bool general = Section == "general";
+            if (general) {
 
             Title("Вид");
             Row("Акцентный цвет", "Один цвет для всех приложений — или свой у каждого", Swatches());
             Row("Меньше движения", "Без пружин и плавных переходов во всех приложениях", new Switch(State.ReducedMotion, delegate(bool on) { w.SetTheme(null, on); }).Root);
-
-            // Что из Windows заменяют приложения dev.txt. Каждая замена выключается — и Windows возвращается как была.
-            Title("Что заменено в Windows");
-            Replacement("Панель задач", "dock", "bar");
-            Replacement("Кнопка «Пуск»", "dock", "winKey");
-            Replacement("Переключение окон Alt+Tab", "smena", "replace");
 
             Title("Запуск");
             Row("Запускать core.txt вместе с Windows", "Тихо, в трее: приложения сразу видят друг друга и общие настройки", new Switch(w.DemoMode ? true : Autostart.Enabled, delegate(bool on) { if (!w.DemoMode) Autostart.Set(on); }).Root);
@@ -192,6 +220,7 @@ namespace DevTxt.Core
 
             Title("Обновления");
             Row("Проверять обновления при запуске", null, new Switch(State.AutoCheck, delegate(bool on) { State.AutoCheck = on; if (!w.DemoMode) State.Save(); }).Root);
+            }
 
             foreach (var c in w.Cards)
             {
@@ -199,8 +228,8 @@ namespace DevTxt.Core
                 object data;
                 w.States.TryGetValue(c.App.Id + ".settings", out data);
                 var settings = data as Dictionary<string, object>;
+                if (Section != "app:" + c.App.Id) continue;   // в этом разделе — одно приложение
                 if (settings == null && (!c.App.HasExe || !c.S.Installed)) continue;   // показывать нечего
-                AppTitle(c);
                 if (settings == null)
                 {
                     var b = new Btn();

@@ -17,7 +17,7 @@ namespace DevTxt.Core
 {
     class MainWindow : Window
     {
-        const double W = 920, H = 640;
+        const double W = 1120, H = 720;
         const int PApps = 0, PScenarios = 1, PSettings = 2, PWelcome = 3;
         // Значок core.txt — тот же рисунок, что в kit.txt (icons/sprites.json, «core»)
         static readonly string[] CoreSprite = { ".....#....", "....##....", ".########.", "##########", ".########.", "..######..", "...##E#...", "...##E#...", "..######..", ".########.", "##########", ".########." };
@@ -36,7 +36,9 @@ namespace DevTxt.Core
         readonly Scenarios scenarios;
         ScrollViewer appsView;
         FrameworkElement bottom;
-        Seg tabs;
+        NavShell shell;                                   // общий каркас окна dev.txt
+        readonly List<string> navKeys = new List<string>(); // что открывает каждый раздел слева
+        string navSig;
         int page;
         bool checking, quitting, updatingSelf;
         string notice;   // последняя ошибка — показывается в строке состояния
@@ -56,7 +58,7 @@ namespace DevTxt.Core
             page = !demo && !State.Onboarded ? PWelcome : startPage;
             Title = "core.txt";
             Width = W; Height = H;
-            MinWidth = W; MinHeight = 520;
+            MinWidth = 1000; MinHeight = 600;
             // Родное окно Windows 11: системная рамка и тень, Mica, тема Windows, размер меняется, окно прилипает к краям
             Ui.ThemeFollows = !demo;
             Ui.Native(this, true);
@@ -107,47 +109,29 @@ namespace DevTxt.Core
         // ───────── Разметка ─────────
         FrameworkElement Build()
         {
-            var root = new Grid { Background = Ui.Bg, ClipToBounds = true };
-            root.Children.Add(Ui.Backdrop());
-            var layout = new DockPanel { LastChildFill = true };
-            root.Children.Add(layout);
+            // Общий каркас dev.txt: слева значок, имя и разделы, справа заголовок, страница и нижняя строка
+            shell = new NavShell(this, CoreSprite, "core", "версия " + Program.VersionText, Close);
+            shell.Changed = delegate(int i) { if (i >= 0 && i < navKeys.Count) Go(navKeys[i]); };
 
-            // Шапка: за неё окно перетаскивается
-            var header = new Grid { Height = 92, Background = Brushes.Transparent };
-            header.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { if (e.ButtonState == MouseButtonState.Pressed) try { DragMove(); } catch { } };
-            var mark = Ui.Sprite(CoreSprite, 40);
-            mark.VerticalAlignment = VerticalAlignment.Center;
-            var title = Ui.Brand("core", Tokens.Size.Display, FontWeights.Bold);
-            title.Margin = new Thickness(10, 0, 0, 2); title.VerticalAlignment = VerticalAlignment.Center;
-            header.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(32, 22, 0, 0), VerticalAlignment = VerticalAlignment.Center, Children = { mark, title } });
-
-            tabs = new Seg(new string[] { "Приложения", "Сценарии", "Настройки" }, Math.Min(page, PSettings), delegate(int i) { ShowPage(i); Animate(); });
-            tabs.Root.HorizontalAlignment = HorizontalAlignment.Right; tabs.Root.VerticalAlignment = VerticalAlignment.Center;
-            tabs.Root.Margin = new Thickness(0, 30, 32, 0);
-            header.Children.Add(tabs.Root);
-
-            header.Children.Add(Ui.CaptionButtons(this, Close));   // кнопки окна как у Windows 11
-            DockPanel.SetDock(header, Dock.Top);
-            layout.Children.Add(header);
-
-            // Низ: строка состояния и кнопка проверки обновлений
-            var bar = new DockPanel { Height = 64, Margin = new Thickness(32, 0, 32, 6) };
+            // Низ: строка состояния и кнопки
             checkBtn.Root.VerticalAlignment = VerticalAlignment.Center;
             DockPanel.SetDock(checkBtn.Root, Dock.Right);
-            bar.Children.Add(checkBtn.Root);
+            shell.Bottom.Children.Add(checkBtn.Root);
             allBtn.Root.VerticalAlignment = VerticalAlignment.Center; allBtn.Root.Margin = new Thickness(0, 0, 8, 0);
             allBtn.Hide();
             DockPanel.SetDock(allBtn.Root, Dock.Right);
-            bar.Children.Add(allBtn.Root);
+            shell.Bottom.Children.Add(allBtn.Root);
             footer.VerticalAlignment = VerticalAlignment.Center;
-            bar.Children.Add(footer);
-            DockPanel.SetDock(bar, Dock.Bottom);
-            layout.Children.Add(bar);
-            bottom = bar;
+            footer.TextWrapping = TextWrapping.Wrap; footer.Margin = new Thickness(0, 0, 16, 0);
+            shell.Bottom.Children.Add(footer);
+            bottom = shell.Bottom;
 
             appsView = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Padding = new Thickness(25, 0, 25, 0), Content = grid, Focusable = false };
-            layout.Children.Add(new Grid { Children = { appsView, scenariosPage.Root, settings.Root, welcome.Root } });
-            return root;
+            shell.Body.Children.Add(appsView);
+            shell.Body.Children.Add(scenariosPage.Root);
+            shell.Body.Children.Add(settings.Root);
+            shell.Body.Children.Add(welcome.Root);
+            return shell.Root;
         }
 
         FrameworkElement WindowButton(string glyph, string tip, bool danger, Action click)
@@ -162,20 +146,73 @@ namespace DevTxt.Core
 
         void ShowPage(int i)
         {
-            int from = page;
             page = i;
-            bool first = i == PWelcome;   // на первом запуске нет ни вкладок, ни нижней строки — только вопросы
-            tabs.Root.Visibility = first ? Visibility.Collapsed : Visibility.Visible;
-            bottom.Visibility = first ? Visibility.Collapsed : Visibility.Visible;
-            if (!first) tabs.Index = i;
+            bool first = i == PWelcome;   // на первом запуске нет ни разделов, ни нижней строки — только вопросы
+            shell.Chrome(!first);
             appsView.Visibility = i == PApps ? Visibility.Visible : Visibility.Collapsed;
             scenariosPage.Root.Visibility = i == PScenarios ? Visibility.Visible : Visibility.Collapsed;
             settings.Root.Visibility = i == PSettings ? Visibility.Visible : Visibility.Collapsed;
             welcome.Root.Visibility = first ? Visibility.Visible : Visibility.Collapsed;
             RenderAll();
-            // Страница въезжает с той стороны, где её вкладка
-            FrameworkElement now = i == PApps ? appsView : i == PScenarios ? scenariosPage.Root : i == PSettings ? (FrameworkElement)settings.Root : null;
-            if (now != null && from != i) Motion.SlideIn(now, from == PWelcome ? 0 : i > from ? 28 : -28);
+        }
+
+        // Раздел слева: страница, её заголовок и вход снизу, как в «Параметрах» Windows 11
+        internal void Go(string key)
+        {
+            if (key == "apps") ShowPage(PApps);
+            else if (key == "scenarios") ShowPage(PScenarios);
+            else { settings.Section = key; ShowPage(PSettings); }
+            FrameworkElement now = page == PApps ? appsView : page == PScenarios ? scenariosPage.Root : (FrameworkElement)settings.Root;
+            Motion.Enter(now);
+            Animate();
+        }
+
+        string CurrentKey { get { return page == PApps ? "apps" : page == PScenarios ? "scenarios" : page == PSettings ? settings.Section : ""; } }
+
+        bool HasSettings(Card c)
+        {
+            object d;
+            return States.TryGetValue(c.App.Id + ".settings", out d) && d != null || c.App.HasExe && c.S.Installed;
+        }
+
+        // Разделы слева. Собираются заново, только когда меняется их список (появилось или пропало приложение).
+        void BuildNav()
+        {
+            var keys = new List<string> { "apps", "scenarios", "general", "replace" };
+            foreach (var c in Cards) if (HasSettings(c)) keys.Add("app:" + c.App.Id);
+            string sig = string.Join(",", keys.ToArray());
+            if (sig != navSig)
+            {
+                navSig = sig;
+                navKeys.Clear();
+                shell.Clear();
+                Action<string, string, FrameworkElement> add = delegate(string key, string label, FrameworkElement icon) { shell.Add(label, icon); navKeys.Add(key); };
+                add("apps", "Приложения", Ui.Glyph("\uE71D"));
+                add("scenarios", "Сценарии", Ui.Glyph("\uE945"));
+                shell.Header("Настройки");
+                add("general", "Общие", Ui.Glyph("\uE713"));
+                add("replace", "Замены Windows", Ui.Glyph("\uE770"));
+                bool any = false;
+                foreach (var c in Cards)
+                {
+                    if (!HasSettings(c)) continue;
+                    if (!any) { shell.Header("Приложения dev.txt"); any = true; }
+                    add("app:" + c.App.Id, c.App.Name.ToLowerInvariant() + ".txt", c.App.Sprite != null ? Ui.Sprite(c.App.Sprite, 20) : (FrameworkElement)Ui.Glyph("\uE74C"));
+                }
+            }
+            shell.Selected = navKeys.IndexOf(CurrentKey);
+            // Заголовок раздела
+            string key2 = CurrentKey;
+            if (page == PWelcome) shell.Title("", "");
+            else if (key2 == "apps") shell.Title("Приложения", "Установить, обновить и открыть всё, что есть в dev.txt");
+            else if (key2 == "scenarios") shell.Title("Сценарии", "Приложения помогают друг другу сами — включите то, что нужно");
+            else if (key2 == "general") shell.Title("Общие", "Вид, запуск, папка и обновления — для всех приложений сразу");
+            else if (key2 == "replace") shell.Title("Замены Windows", "Что из Windows заменяют приложения dev.txt. Выключите — и Windows вернётся как была");
+            else if (key2.StartsWith("app:"))
+            {
+                Card c = Find(key2.Substring(4));
+                shell.Title(c != null ? c.App.Name.ToLowerInvariant() + ".txt" : "", c != null ? c.App.Tagline : "");
+            }
         }
 
         // Волна при переходе на страницу
@@ -205,6 +242,7 @@ namespace DevTxt.Core
 
         void RenderAll()
         {
+            if (shell != null) BuildNav();
             foreach (var c in Cards) c.Render(Install, Open, Find, Connect, Connected);
             if (page == PSettings) settings.Render();
             else if (page == PScenarios) scenariosPage.Render();
@@ -598,6 +636,7 @@ namespace DevTxt.Core
                 else if (c.App.Id == "dock" || c.App.Id == "smena") { c.S.Path = "demo"; c.S.Version = new Version(0, 1, 2); c.S.Running = true; }
             }
             // То, что Kapsula присылает на самом деле (см. её CoreHub.cs), здесь — часть списка
+            { string sec = Environment.GetEnvironmentVariable("CORE_DEMO_SECTION"); if (sec != null) settings.Section = sec; }   // снимок нужного раздела настроек
             string demoStep = Environment.GetEnvironmentVariable("CORE_DEMO_STEP");   // снимок нужного шага установщика
             if (demoStep == "1") welcome.SetStep(1);
             if (demoStep == "2")

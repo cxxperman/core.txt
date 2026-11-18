@@ -26,13 +26,16 @@ namespace DevTxt.Core
         }
 
         // Запуск вместе с Windows — тихо, в трее. Меняется только по переключателю в настройках.
-        public static void Set(bool on)
+        public static void Set(bool on) { Set(on, System.Reflection.Assembly.GetExecutingAssembly().Location); }
+
+        // exe — какой файл запускать: при установке core.txt это уже его постоянное место
+        public static void Set(bool on, string exe)
         {
             try
             {
                 using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(Key))
                 {
-                    if (on) k.SetValue(Name, "\"" + System.Reflection.Assembly.GetExecutingAssembly().Location + "\" --tray");
+                    if (on) k.SetValue(Name, "\"" + exe + "\" --tray");
                     else k.DeleteValue(Name, false);
                 }
             }
@@ -40,92 +43,9 @@ namespace DevTxt.Core
         }
     }
 
-    class SettingsPage
+    class SettingsPage : Page
     {
-        public readonly ScrollViewer Root;
-        readonly StackPanel stack = new StackPanel { Margin = new Thickness(7, 0, 7, 12) };
-        readonly MainWindow w;
-
-        public SettingsPage(MainWindow w)
-        {
-            this.w = w;
-            Root = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Padding = new Thickness(25, 0, 25, 0), Content = stack, Focusable = false, Visibility = Visibility.Collapsed };
-        }
-
-        // ───────── Кирпичики страницы ─────────
-        void Title(string text)
-        {
-            var t = Ui.T(text, Tokens.Size.Heading, Ui.Label2, FontWeights.SemiBold);
-            t.Margin = new Thickness(4, stack.Children.Count == 0 ? 2 : 20, 0, 8);
-            stack.Children.Add(t);
-        }
-
-        void Row(string label, string hint, FrameworkElement control) { Row(label, hint, control, null); }
-
-        // below — что-то широкое под названием (например, плашки вариантов)
-        void Row(string label, string hint, FrameworkElement control, FrameworkElement below)
-        {
-            var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
-            text.Children.Add(Ui.T(label, Tokens.Size.Body, Ui.Label, FontWeights.Normal));
-            if (!string.IsNullOrEmpty(hint))
-            {
-                var h = Ui.T(hint, Tokens.Size.Micro, Ui.Label3, FontWeights.Normal);
-                h.TextWrapping = TextWrapping.Wrap; h.Margin = new Thickness(0, 1, 0, 0);
-                text.Children.Add(h);
-            }
-            var line = new DockPanel { LastChildFill = true, MinHeight = 30 };
-            if (control != null)
-            {
-                control.VerticalAlignment = VerticalAlignment.Center;
-                DockPanel.SetDock(control, Dock.Right);
-                line.Children.Add(control);
-            }
-            line.Children.Add(text);
-            UIElement content = line;
-            if (below != null) content = new StackPanel { Children = { line, below } };
-            var row = Ui.Row(content);
-            row.Margin = new Thickness(0, 0, 0, 8);
-            stack.Children.Add(row);
-        }
-
-        // Шапка раздела приложения: значок и название с подписью
-        void AppTitle(Card c)
-        {
-            var name = Ui.Brand(c.App.Name, Tokens.Size.Title, FontWeights.SemiBold);
-            name.VerticalAlignment = VerticalAlignment.Center;
-            var line = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(4, 26, 0, 10) };
-            if (c.App.Sprite != null)
-            {
-                var s = Ui.Sprite(c.App.Sprite, 22);
-                s.Margin = new Thickness(0, 0, 9, 0); s.VerticalAlignment = VerticalAlignment.Center;
-                line.Children.Add(s);
-            }
-            line.Children.Add(name);
-            stack.Children.Add(line);
-        }
-
-        FrameworkElement Swatches()
-        {
-            var row = new StackPanel { Orientation = Orientation.Horizontal };
-            var colors = new Color?[] { null, Tokens.Palette.Brand, Tokens.Palette.Blue, Tokens.Palette.Purple, Tokens.Palette.Green, Tokens.Palette.Pink };
-            var names = new string[] { "Свой у каждого приложения", "Оранжевый", "Синий", "Фиолетовый", "Зелёный", "Розовый" };
-            for (int i = 0; i < colors.Length; i++)
-            {
-                Color? c = colors[i];
-                string hex = c.HasValue ? "#" + c.Value.R.ToString("X2") + c.Value.G.ToString("X2") + c.Value.B.ToString("X2") : null;
-                bool on = string.Equals(hex, State.Accent, StringComparison.OrdinalIgnoreCase);
-                var inner = new Border { Width = 18, Height = 18, CornerRadius = new CornerRadius(9), Background = c.HasValue ? Ui.Solid(c.Value) : Ui.GlassStrong, BorderBrush = c.HasValue ? null : Ui.Rim, BorderThickness = new Thickness(c.HasValue ? 0 : 1) };
-                var ring = new Border
-                {
-                    Width = 28, Height = 28, CornerRadius = new CornerRadius(14), BorderThickness = new Thickness(2), BorderBrush = on ? Ui.Label : Brushes.Transparent,
-                    Background = Brushes.Transparent, Child = inner, Cursor = Cursors.Hand, ToolTip = names[i], Margin = new Thickness(4, 0, 0, 0)
-                };
-                inner.HorizontalAlignment = HorizontalAlignment.Center; inner.VerticalAlignment = VerticalAlignment.Center;
-                ring.MouseLeftButtonDown += delegate { w.SetTheme(hex ?? "", null); };
-                row.Children.Add(ring);
-            }
-            return row;
-        }
+        public SettingsPage(MainWindow w) : base(w) { }
 
         static double Num(object v, double fallback)
         {

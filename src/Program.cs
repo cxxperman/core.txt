@@ -2,7 +2,7 @@
 // Ключи для проверки:
 //   --demo              выдуманные состояния приложений; сеть и диск не трогаются
 //   --shot файл.png     нарисовать окно в файл и выйти (обычно вместе с --demo)
-//   --page settings     открыть сразу страницу настроек; --scroll N — прокрутить её (для снимков)
+//   --page имя          открыть сразу страницу: scenarios, settings или welcome; --scroll N — прокрутить её (для снимков)
 //   --tray              запуститься без окна, только значок в трее и хаб
 //   --selftest          проверить разбор каталога, ответа GitHub и замену файла; код выхода 0 — всё в порядке
 //   --hub порт          запустить только хаб на этом порту, без окна (для проверок из kit.txt)
@@ -45,13 +45,19 @@ namespace DevTxt.Core
             double scroll = 0;
             for (int i = 0; i + 1 < args.Length; i++)
             {
-                if (args[i] == "--page" && args[i + 1] == "settings") page = 1;
+                if (args[i] == "--page") page = args[i + 1] == "scenarios" ? 1 : args[i + 1] == "settings" ? 2 : args[i + 1] == "welcome" ? 3 : 0;
                 if (args[i] == "--scroll") double.TryParse(args[i + 1], out scroll);
             }
 
             bool created = true;
             Mutex mutex = null;
             if (shot == null) mutex = new Mutex(true, "devtxt_core_single_instance", out created);
+            bool handover = Array.IndexOf(args, "--after-update") >= 0 || Array.IndexOf(args, "--after-install") >= 0;
+            if (!created && handover)
+            {
+                // Нас запустила прежняя копия (обновление или установка) и сейчас закроется — ждём её
+                try { created = mutex.WaitOne(15000); } catch (AbandonedMutexException) { created = true; }
+            }
             if (!created)
             {
                 // Уже запущен (возможно, сидит в трее): просим показать окно и выходим
@@ -60,7 +66,7 @@ namespace DevTxt.Core
             }
 
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-            if (!demo) State.Load();
+            if (!demo) { State.Load(); SelfUpdate.Cleanup(); }
             Catalog.Load();
             var w = new MainWindow(demo, page);
             if (shot != null) { w.Shot(shot, scroll); return 0; }
@@ -122,6 +128,54 @@ namespace DevTxt.Core
             Check(s.UpdateAvailable, "1.10.0 is newer than 1.9.0");
             s.Version = new Version(1, 10, 0);
             Check(!s.UpdateAvailable, "same version is not an update");
+
+            // Сценарии: пока условие верно, настройка держится; потом возвращается как было
+            {
+                var states = new System.Collections.Generic.Dictionary<string, object>();
+                var sent = new System.Collections.Generic.List<string>();
+                var on = new System.Collections.Generic.HashSet<string> { "call-aura-on" };
+                Func<bool, object> aura = delegate(bool power) { return Json.Parse("{\"groups\":[{\"items\":[{\"key\":\"power\",\"type\":\"switch\",\"value\":" + (power ? "true" : "false") + "}]}]}"); };
+                var sc = new Scenarios(
+                    delegate(string topic) { object v; return states.TryGetValue(topic, out v) ? v : null; },
+                    delegate(string target, string key, object value) { sent.Add(target + "." + key + "=" + value); states["aura.settings"] = aura(value is bool && (bool)value); },
+                    delegate(string id) { return on.Contains(id); });
+                states["maska.voice"] = Json.Parse("{\"inCall\":true}");
+                sc.Update();
+                Check(sent.Count == 0 && !sc.IsActive("call-aura-on"), "scenario waits until the target app is connected");
+                states["aura.settings"] = aura(false);
+                sc.Update();
+                Check(sent.Count == 1 && sent[0] == "aura.power=True" && sc.IsActive("call-aura-on"), "call starts — Aura is switched on");
+                sc.Update();
+                Check(sent.Count == 1, "nothing is sent twice");
+                states["maska.voice"] = Json.Parse("{\"inCall\":false}");
+                sc.Update();
+                Check(sent.Count == 2 && sent[1] == "aura.power=False" && !sc.IsActive("call-aura-on"), "call ends — Aura goes back to off");
+
+                sent.Clear();
+                states["aura.settings"] = aura(true);   // была включена ещё до звонка
+                states["maska.voice"] = Json.Parse("{\"inCall\":true}");
+                sc.Update();
+                states.Remove("maska.voice");   // Discord закрыли посреди звонка
+                sc.Update();
+                Check(sent.Count == 0, "what was already on is left alone, before and after");
+
+                states["aura.settings"] = aura(false);
+                states["maska.voice"] = Json.Parse("{\"inCall\":true}");
+                sc.Update();
+                on.Clear();   // сценарий выключили посреди звонка
+                sc.Update();
+                Check(sent.Count == 2 && sent[1] == "aura.power=False", "switching a running scenario off restores the setting");
+
+                sent.Clear();
+                on.Add("call-aura-on");
+                states["maska.voice"] = Json.Parse("{\"inCall\":true}");
+                sc.Update();
+                states["aura.settings"] = aura(false);   // человек сам выключил Aura во время звонка
+                states["maska.voice"] = Json.Parse("{\"inCall\":false}");
+                sc.Update();
+                Check(sent.Count == 1, "a setting changed by hand meanwhile is not overwritten");
+                Check(!Scenarios.Truthy(null, null) && Scenarios.Truthy(Json.Parse("{}"), null) && !Scenarios.Truthy(Json.Parse("{\"mute\":0}"), "mute"), "conditions read the state correctly");
+            }
 
             // Замена файла программы: новая версия ложится на место старой, лишнего рядом не остаётся
             string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-test-" + System.Diagnostics.Process.GetCurrentProcess().Id);

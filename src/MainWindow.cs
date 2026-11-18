@@ -1,5 +1,5 @@
-// core.txt. MainWindow.cs — окно: шапка с вкладками, страница приложений, страница настроек, строка состояния.
-// Здесь же окно держит хаб и значок в трее.
+// core.txt. MainWindow.cs — окно: шапка с вкладками, страницы (приложения, сценарии, настройки, первый запуск),
+// строка состояния. Здесь же окно держит хаб, сценарии и значок в трее.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -18,27 +18,33 @@ namespace DevTxt.Core
     class MainWindow : Window
     {
         const double W = 920, H = 640;
+        const int PApps = 0, PScenarios = 1, PSettings = 2, PWelcome = 3;
         // Значок core.txt — тот же рисунок, что в kit.txt (icons/sprites.json, «core»)
         static readonly string[] CoreSprite = { ".....#....", "....##....", ".########.", "##########", ".########.", "..######..", "...##E#...", "...##E#...", "..######..", ".########.", "##########", ".########." };
 
         internal readonly bool DemoMode;
         internal readonly List<Card> Cards = new List<Card>();
         internal readonly Dictionary<string, object> States = new Dictionary<string, object>();   // что приложения сообщили хабу
+        readonly HashSet<string> connectedApps = new HashSet<string>();
         readonly UniformGrid grid = new UniformGrid { Columns = 2, VerticalAlignment = VerticalAlignment.Top };
         readonly TextBlock footer = Ui.T("", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
         readonly Btn checkBtn = new Btn();
         readonly DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         readonly SettingsPage settings;
+        readonly ScenariosPage scenariosPage;
+        readonly WelcomePage welcome;
+        readonly Scenarios scenarios;
         ScrollViewer appsView;
+        FrameworkElement bottom;
         Seg tabs;
         int page;
-        bool checking, quitting;
-        string notice;   // последняя ошибка команды — показывается в строке состояния
+        bool checking, quitting, updatingSelf;
+        string notice;   // последняя ошибка — показывается в строке состояния
 
         Hub hub;
         HubServer server;
         HubClient local;
-        int commandSeq, connected;
+        int commandSeq;
         System.Windows.Forms.NotifyIcon tray;
 
         [DllImport("dwmapi.dll")]
@@ -47,7 +53,7 @@ namespace DevTxt.Core
         public MainWindow(bool demo, int startPage)
         {
             DemoMode = demo;
-            page = startPage;
+            page = !demo && !State.Onboarded ? PWelcome : startPage;
             Title = "core.txt";
             Width = W; Height = H;
             WindowStyle = WindowStyle.None;
@@ -59,6 +65,12 @@ namespace DevTxt.Core
             TextOptions.SetTextFormattingMode(this, TextFormattingMode.Ideal);
             Ui.ForceReducedMotion = State.ReducedMotion;
             settings = new SettingsPage(this);
+            scenariosPage = new ScenariosPage(this);
+            welcome = new WelcomePage(this);
+            scenarios = new Scenarios(
+                delegate(string topic) { object data; return States.TryGetValue(topic, out data) ? data : null; },
+                delegate(string app, string key, object value) { SendCommand(app, "settings.set", Hub.Msg("key", key, "value", value)); },
+                delegate(string id) { return State.Scenarios.Contains(id); });
             Content = Build();
             BuildCards();
             ShowPage(page);
@@ -78,11 +90,15 @@ namespace DevTxt.Core
             timer.Start();
             Closing += delegate(object s, System.ComponentModel.CancelEventArgs e)
             {
-                if (!quitting && State.Tray) { e.Cancel = true; Hide(); return; }   // окно закрыли — core.txt остаётся в трее и держит хаб
+                if (!quitting && State.Tray && State.Onboarded) { e.Cancel = true; Hide(); return; }   // окно закрыли — core.txt остаётся в трее и держит хаб
                 if (tray != null) { tray.Visible = false; tray.Dispose(); }
                 if (server != null) server.Stop();
             };
-            if (State.AutoCheck && DateTime.UtcNow - State.Checked > TimeSpan.FromHours(1)) CheckAll();
+            if (State.Onboarded)
+            {
+                StartPending();
+                if (State.AutoCheck && DateTime.UtcNow - State.Checked > TimeSpan.FromHours(1)) CheckAll();
+            }
         }
 
         // ───────── Разметка ─────────
@@ -102,7 +118,7 @@ namespace DevTxt.Core
             title.Margin = new Thickness(10, 0, 0, 2); title.VerticalAlignment = VerticalAlignment.Center;
             header.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(32, 22, 0, 0), VerticalAlignment = VerticalAlignment.Center, Children = { mark, title } });
 
-            tabs = new Seg(new string[] { "Приложения", "Настройки" }, page, delegate(int i) { ShowPage(i); });
+            tabs = new Seg(new string[] { "Приложения", "Сценарии", "Настройки" }, Math.Min(page, PSettings), delegate(int i) { ShowPage(i); });
             tabs.Root.HorizontalAlignment = HorizontalAlignment.Right; tabs.Root.VerticalAlignment = VerticalAlignment.Center;
             tabs.Root.Margin = new Thickness(0, 24, 32, 0);
             header.Children.Add(tabs.Root);
@@ -115,17 +131,18 @@ namespace DevTxt.Core
             layout.Children.Add(header);
 
             // Низ: строка состояния и кнопка проверки обновлений
-            var bottom = new DockPanel { Height = 64, Margin = new Thickness(32, 0, 32, 6) };
+            var bar = new DockPanel { Height = 64, Margin = new Thickness(32, 0, 32, 6) };
             checkBtn.Root.VerticalAlignment = VerticalAlignment.Center;
             DockPanel.SetDock(checkBtn.Root, Dock.Right);
-            bottom.Children.Add(checkBtn.Root);
+            bar.Children.Add(checkBtn.Root);
             footer.VerticalAlignment = VerticalAlignment.Center;
-            bottom.Children.Add(footer);
-            DockPanel.SetDock(bottom, Dock.Bottom);
-            layout.Children.Add(bottom);
+            bar.Children.Add(footer);
+            DockPanel.SetDock(bar, Dock.Bottom);
+            layout.Children.Add(bar);
+            bottom = bar;
 
             appsView = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Padding = new Thickness(25, 0, 25, 0), Content = grid, Focusable = false };
-            layout.Children.Add(new Grid { Children = { appsView, settings.Root } });
+            layout.Children.Add(new Grid { Children = { appsView, scenariosPage.Root, settings.Root, welcome.Root } });
             return root;
         }
 
@@ -142,9 +159,14 @@ namespace DevTxt.Core
         void ShowPage(int i)
         {
             page = i;
-            tabs.Index = i;
-            appsView.Visibility = i == 0 ? Visibility.Visible : Visibility.Collapsed;
-            settings.Root.Visibility = i == 1 ? Visibility.Visible : Visibility.Collapsed;
+            bool first = i == PWelcome;   // на первом запуске нет ни вкладок, ни нижней строки — только вопросы
+            tabs.Root.Visibility = first ? Visibility.Collapsed : Visibility.Visible;
+            bottom.Visibility = first ? Visibility.Collapsed : Visibility.Visible;
+            if (!first) tabs.Index = i;
+            appsView.Visibility = i == PApps ? Visibility.Visible : Visibility.Collapsed;
+            scenariosPage.Root.Visibility = i == PScenarios ? Visibility.Visible : Visibility.Collapsed;
+            settings.Root.Visibility = i == PSettings ? Visibility.Visible : Visibility.Collapsed;
+            welcome.Root.Visibility = first ? Visibility.Visible : Visibility.Collapsed;
             RenderAll();
         }
 
@@ -166,17 +188,23 @@ namespace DevTxt.Core
         void RenderAll()
         {
             foreach (var c in Cards) c.Render(Install, Open, Find);
-            if (page == 1) settings.Render();
+            if (page == PSettings) settings.Render();
+            else if (page == PScenarios) scenariosPage.Render();
+            else if (page == PWelcome) welcome.Render();
+
             int updates = Cards.FindAll(delegate(Card c) { return c.S.UpdateAvailable; }).Count;
             string when = State.Checked == DateTime.MinValue ? "Обновления ещё не проверялись" : "Проверено " + State.Checked.ToLocalTime().ToString("d MMMM, HH:mm");
             string line;
             if (notice != null) line = notice;
+            else if (updatingSelf) line = "Обновляю core.txt…";
             else if (checking) line = "Проверяю обновления…";
-            else if (page == 1) line = server != null && server.Error != null ? "Связь между приложениями не работает: " + server.Error : "Связь между приложениями работает · подключено: " + connected;
+            else if (page == PSettings) line = server != null && server.Error != null ? "Связь между приложениями не работает: " + server.Error : "Связь между приложениями работает · подключено: " + connectedApps.Count;
+            else if (page == PScenarios) line = "Сценарии действуют, пока core.txt запущен";
             else line = (updates > 0 ? "Обновлений: " + updates + " · " : "") + when;
             footer.Text = line + " · версия " + Program.VersionText + " · dev.txt™";
             footer.Foreground = notice != null ? Ui.Solid(Tokens.Palette.Red) : Ui.Label3;
-            checkBtn.Set("Проверить обновления", null, !checking, CheckAll);
+            if (SelfUpdate.Available) checkBtn.Set("Обновить core.txt до " + SelfUpdate.Latest.Version, Tokens.Palette.Brand, !updatingSelf, UpdateSelf);
+            else checkBtn.Set("Проверить обновления", null, !checking, CheckAll);
         }
 
         // ───────── Хаб ─────────
@@ -204,14 +232,15 @@ namespace DevTxt.Core
                 if (data == null) States.Remove(topic); else States[topic] = data;
                 if (topic == "hub.apps")
                 {
-                    connected = 0;
+                    connectedApps.Clear();
                     foreach (object o in data as System.Collections.IEnumerable ?? new object[0])
                     {
-                        var info = o as Dictionary<string, object>;
-                        if (info != null && Json.Str(info, "app") != "core") connected++;
+                        string app = Json.Str(o as Dictionary<string, object>, "app");
+                        if (app != null && app != "core") connectedApps.Add(app);
                     }
                 }
-                if (page == 1 && (topic == "hub.apps" || topic.EndsWith(".settings"))) RenderAll();
+                scenarios.Update();
+                if (page == PScenarios || (page == PSettings && (topic == "hub.apps" || topic.EndsWith(".settings")))) RenderAll();
             }
             else if (type == "result")
             {
@@ -240,6 +269,8 @@ namespace DevTxt.Core
             hub.Receive(local, Hub.Msg("type", "command", "id", "core-" + (++commandSeq), "to", app, "name", name, "args", args));
         }
 
+        internal bool Connected(string app) { return connectedApps.Contains(app); }
+
         // Общий вид меняется здесь: accent — "#RRGGBB", "" (свой у каждого) или null (не менять)
         internal void SetTheme(string accent, bool? reduced)
         {
@@ -259,6 +290,50 @@ namespace DevTxt.Core
             Ui.ForceReducedMotion = State.ReducedMotion;
             State.Save();
             RenderAll();
+        }
+
+        // ───────── Сценарии ─────────
+        internal bool ScenarioActive(string id) { return scenarios.IsActive(id); }
+
+        internal void SetScenario(string id, bool on)
+        {
+            if (on) State.Scenarios.Add(id); else State.Scenarios.Remove(id);
+            if (!DemoMode) State.Save();
+            scenarios.Update();   // выключили действующий — он сразу возвращает всё как было
+            RenderAll();
+        }
+
+        // ───────── Первый запуск ─────────
+        internal void FinishWelcome(List<string> install, bool installSelf, bool autostart)
+        {
+            if (DemoMode) return;
+            State.Onboarded = true;
+            State.Pending = install;
+            if (autostart) Autostart.Set(true, installSelf ? SelfUpdate.InstalledPath : SelfUpdate.CurrentPath);
+            State.Save();
+            if (installSelf)
+            {
+                // Дальше работает уже установленная копия: она и поставит выбранные приложения
+                try { SelfUpdate.InstallSelf(); Quit(); return; }
+                catch (Exception e) { notice = "Не удалось установить core.txt: " + e.Message; }
+            }
+            ShowPage(PApps);
+            StartPending();
+            if (State.AutoCheck) CheckAll();
+        }
+
+        // Ставит то, что выбрали на первом запуске
+        void StartPending()
+        {
+            if (State.Pending.Count == 0) return;
+            var ids = new List<string>(State.Pending);
+            State.Pending.Clear();
+            State.Save();
+            foreach (string id in ids)
+            {
+                Card c = Find(id);
+                if (c != null && !c.App.IsIntegration && !c.S.Installed) Install(c);
+            }
         }
 
         // ───────── Трей ─────────
@@ -299,7 +374,7 @@ namespace DevTxt.Core
         {
             if (!IsVisible) return;
             foreach (var c in Cards) if (c.S.Phase == Phase.Idle) AppOps.Refresh(c.App, c.S);
-            if (page == 0) RenderAll();
+            if (page == PApps) RenderAll();
         }
 
         async void CheckAll()
@@ -317,13 +392,35 @@ namespace DevTxt.Core
                 try
                 {
                     Release r = await Task.Run(delegate { return Releases.Latest(app); });
+                    if (r == null && app.Soon) continue;   // релизов ещё нет — так и должно быть
                     if (r != null) { State.Latest[app.Id] = r; c.S.Latest = r; any = true; }
                     if (c.S.Phase == Phase.Idle) c.S.Error = null;
                 }
-                catch { if (c.S.Phase == Phase.Idle && c.S.Latest == null) c.S.Error = "Не удалось узнать последнюю версию: нет связи с GitHub"; }
+                catch { if (c.S.Phase == Phase.Idle && c.S.Latest == null && !app.Soon) c.S.Error = "Не удалось узнать последнюю версию: нет связи с GitHub"; }
             }
+            // И сам core.txt: его релизов может ещё не быть — тогда просто ничего не предлагаем
+            try { SelfUpdate.Latest = await Task.Run(delegate { return Releases.Latest(SelfUpdate.Entry); }); } catch { }
             if (any) { State.Checked = DateTime.UtcNow; State.Save(); }
             checking = false;
+            RenderAll();
+        }
+
+        async void UpdateSelf()
+        {
+            if (updatingSelf || DemoMode || !SelfUpdate.Available) return;
+            updatingSelf = true;
+            notice = null;
+            RenderAll();
+            try
+            {
+                Release r = SelfUpdate.Latest;
+                string file = await Task.Run(delegate { return Releases.Download(r, null); });
+                SelfUpdate.Apply(file);
+                Quit();   // новая версия уже запущена и ждёт, пока эта закроется
+                return;
+            }
+            catch (Exception e) { notice = "Не удалось обновить core.txt: " + e.Message; }
+            updatingSelf = false;
             RenderAll();
         }
 
@@ -369,7 +466,8 @@ namespace DevTxt.Core
         void Demo()
         {
             State.Checked = new DateTime(2026, 11, 17, 9, 30, 0, DateTimeKind.Local).ToUniversalTime();
-            connected = 2;
+            connectedApps.Add("kapsula"); connectedApps.Add("aura");
+            State.Scenarios.Add("game-hide-island");
             foreach (var c in Cards)
             {
                 if (c.App.Id == "kapsula") { c.S.Path = "demo"; c.S.Version = new Version(0, 7, 5); c.S.Running = true; c.S.Latest = new Release { Version = new Version(0, 7, 6) }; }
@@ -382,7 +480,7 @@ namespace DevTxt.Core
             States["aura.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""power"",""type"":""switch"",""label"":""Обработка голоса"",""hint"":""Включает и выключает Aura"",""value"":true},{""key"":""preset"",""type"":""choice"",""label"":""Готовый звук"",""value"":""studio"",""options"":[{""value"":""auto"",""label"":""Под вас""},{""value"":""studio"",""label"":""Подкаст""},{""value"":""radio"",""label"":""Эфир""},{""value"":""crystal"",""label"":""Стрим""},{""value"":""velvet"",""label"":""Бархат""},{""value"":""cinema"",""label"":""Кино""},{""value"":""whisper"",""label"":""Чистый""},{""value"":""custom"",""label"":""Свой""}]},{""key"":""mute"",""type"":""switch"",""label"":""Заглушить микрофон"",""hint"":""Тишина для всех программ"",""value"":false},{""key"":""auto"",""type"":""switch"",""label"":""Авто-уровень"",""hint"":""Выравнивает громкость, вытягивает тихий микрофон"",""value"":true},{""key"":""monitor"",""type"":""switch"",""label"":""Слышать себя"",""hint"":""Только в наушниках, иначе будет эхо"",""value"":false}]},{""title"":""Звук"",""items"":[{""key"":""nsEngine"",""type"":""choice"",""label"":""Шумодав"",""value"":""0"",""options"":[{""value"":""0"",""label"":""Обычный""},{""value"":""1"",""label"":""Жёсткий""}]},{""key"":""loudTarget"",""type"":""choice"",""label"":""Громкость на выходе"",""value"":""0"",""options"":[{""value"":""0"",""label"":""Не выравнивать""},{""value"":""-18"",""label"":""−18 LUFS""},{""value"":""-16"",""label"":""−16 LUFS""},{""value"":""-14"",""label"":""−14 LUFS""}]},{""key"":""dehum"",""type"":""switch"",""label"":""Убрать гул сети"",""hint"":""Вырезает 50 Гц и его гармоники — гудение от розетки и плохой земли"",""value"":false}]}]}");
         }
 
-        // Рисует окно в файл PNG, не показывая его на экране. scroll — на сколько прокрутить страницу настроек.
+        // Рисует окно в файл PNG, не показывая его на экране. scroll — на сколько прокрутить открытую страницу.
         public void Shot(string file, double scroll)
         {
             var root = (FrameworkElement)Content;
@@ -392,7 +490,12 @@ namespace DevTxt.Core
             root.UpdateLayout();
             RenderAll();
             root.UpdateLayout();
-            if (scroll > 0) { settings.Root.ScrollToVerticalOffset(scroll); root.UpdateLayout(); }
+            if (scroll > 0)
+            {
+                ScrollViewer view = page == PSettings ? settings.Root : page == PScenarios ? scenariosPage.Root : page == PWelcome ? welcome.Root : appsView;
+                view.ScrollToVerticalOffset(scroll);
+                root.UpdateLayout();
+            }
             var bmp = new RenderTargetBitmap((int)(W * 1.5), (int)(H * 1.5), 144, 144, PixelFormats.Pbgra32);
             bmp.Render(root);
             var enc = new PngBitmapEncoder();

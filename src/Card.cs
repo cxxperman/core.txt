@@ -103,7 +103,14 @@ namespace DevTxt.Core
             bar.Value = S.Progress;
             Second.Hide();
 
-            if (App.IsIntegration)
+            if (App.Soon && !S.Installed)
+            {
+                // Ещё не выпущено: честно говорим об этом и не показываем кнопку, которая не сработает
+                text = "В разработке";
+                hint = App.IsIntegration ? "" : "Появится здесь, когда выйдет первая версия";
+                Main.Hide();
+            }
+            else if (App.IsIntegration)
             {
                 Card via = App.Via != null ? find(App.Via) : null;
                 text = S.Installed ? "Подключено" : "Не подключено";

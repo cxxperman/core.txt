@@ -16,6 +16,7 @@ namespace DevTxt.Core
     {
         public string Id, Name, Tagline, Kind, Repo, Asset, Exe, Process, Silent, Installed, Marker, Via, Hint;
         public Color Color;
+        public bool Soon;         // ещё не выпущено: пока его нет на компьютере, вместо кнопки — «В разработке»
         public string[] Sprite;   // пиксельный значок: строки из «.» (пусто), «#» (тело) и «E» (глаз)
         public bool IsIntegration { get { return Kind == "integration"; } }
     }
@@ -123,6 +124,8 @@ namespace DevTxt.Core
                 if (list.Exists(delegate(AppEntry x) { return x.Id == a.Id; })) continue;
                 try { a.Color = (Color)ColorConverter.ConvertFromString(Json.Str(d, "color")); } catch { }
                 a.Sprite = ReadSprite(d);
+                object soon;
+                a.Soon = d.TryGetValue("soon", out soon) && soon is bool && (bool)soon;
                 if (a.Kind == "integration")
                 {
                     if (string.IsNullOrEmpty(a.Marker)) continue;
@@ -156,6 +159,9 @@ namespace DevTxt.Core
         public static bool ReducedMotion;
         public static bool Tray = true;           // оставаться в трее после закрытия окна
         public static bool AutoCheck = true;      // проверять обновления при запуске
+        public static bool Onboarded;             // первый запуск пройден
+        public static readonly HashSet<string> Scenarios = new HashSet<string>();   // включённые сценарии
+        public static List<string> Pending = new List<string>();                    // что поставить после первого запуска
 
         static bool Flag(Dictionary<string, object> d, string key, bool fallback)
         {
@@ -186,6 +192,9 @@ namespace DevTxt.Core
                 ReducedMotion = Flag(set, "reducedMotion", false);
                 Tray = Flag(set, "tray", true);
                 AutoCheck = Flag(set, "autoCheck", true);
+                Onboarded = Flag(set, "onboarded", false);
+                foreach (object o in Json.List(d, "scenarios")) if (o is string) Scenarios.Add((string)o);
+                foreach (object o in Json.List(d, "pending")) if (o is string) Pending.Add((string)o);
             }
             catch { }
         }
@@ -196,8 +205,9 @@ namespace DevTxt.Core
             {
                 var latest = new Dictionary<string, object>();
                 foreach (var p in Latest) latest[p.Key] = p.Value.ToDict();
-                var set = new Dictionary<string, object> { { "accent", Accent }, { "reducedMotion", ReducedMotion }, { "tray", Tray }, { "autoCheck", AutoCheck } };
-                var d = new Dictionary<string, object> { { "paths", Paths }, { "latest", latest }, { "checked", Checked.Ticks.ToString() }, { "settings", set } };
+                var set = new Dictionary<string, object> { { "accent", Accent }, { "reducedMotion", ReducedMotion }, { "tray", Tray }, { "autoCheck", AutoCheck }, { "onboarded", Onboarded } };
+                var d = new Dictionary<string, object> { { "paths", Paths }, { "latest", latest }, { "checked", Checked.Ticks.ToString() }, { "settings", set },
+                    { "scenarios", new List<string>(Scenarios) }, { "pending", Pending } };
                 Directory.CreateDirectory(Dir);
                 File.WriteAllText(FilePath, Json.Write(d), Encoding.UTF8);
             }

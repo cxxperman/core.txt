@@ -73,6 +73,7 @@ namespace DevTxt.Core
             }
 
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            Ui.Styles(app.Resources);   // тёмные подсказки и тонкие полосы прокрутки, как во всех приложениях dev.txt
             if (!demo) { State.Load(); SelfUpdate.Cleanup(); }
             Catalog.Load();
             var w = new MainWindow(demo, page, Array.IndexOf(args, "--after-install") >= 0);
@@ -297,6 +298,66 @@ namespace DevTxt.Core
                 sc.Update();
                 Check(sent.Count == 1, "a setting changed by hand meanwhile is not overwritten");
                 Check(!Scenarios.Truthy(null, null) && Scenarios.Truthy(Json.Parse("{}"), null) && !Scenarios.Truthy(Json.Parse("{\"mute\":0}"), "mute"), "conditions read the state correctly");
+            }
+
+            // Мелочи вида и поведения: подписи, раскладка, порядок карточек, место окна
+            {
+                const long mb = 1024 * 1024;
+                Check(Releases.Megabytes(34 * mb + 700000, 151 * mb) == "34 из 151 МБ", "download progress is shown in megabytes, got " + Releases.Megabytes(34 * mb + 700000, 151 * mb));
+                Check(Releases.Megabytes(450000, 2 * mb + 100000) == "0,4 из 2,1 МБ", "a small file is counted in tenths, got " + Releases.Megabytes(450000, 2 * mb + 100000));
+                Check(Releases.Megabytes(5, 0) == "" && Releases.Megabytes(999 * mb, 20 * mb) == "20 из 20 МБ", "progress never runs past the total");
+
+                Check(Errors.Short(new WebException("The remote name could not be resolved")) == Errors.Offline, "no network is said in Russian");
+                Check(Errors.Short(new System.IO.IOException("The process cannot access the file", unchecked((int)0x80070020))) == Errors.Busy, "a locked file asks to close the app");
+                Check(Errors.Short(new System.IO.IOException("read failed", new System.Net.Sockets.SocketException(10054))) == Errors.Offline, "a dropped download is a network problem");
+                Check(Errors.Short(new UnauthorizedAccessException("Access to the path is denied.")) == Errors.Denied, "no access to the folder is said in Russian");
+                Check(Errors.Short(new Exception("Контрольная сумма файла не совпала с релизом")) == Errors.Checksum, "a checksum mismatch has a short phrase");
+                var foreign = new InvalidOperationException("Something odd happened");
+                Check(Errors.Short(foreign) == Errors.Unknown && Errors.Detail(foreign) == "Something odd happened", "an unknown error keeps its text only for the tooltip");
+                var own = new Exception("Установщик не закончил работу за десять минут");
+                Check(Errors.Short(own) == own.Message && Errors.Detail(own) == null, "our own messages are shown as they are");
+                var st = new AppStatus();
+                st.Fail("Не удалось запустить", new UnauthorizedAccessException("denied"));
+                Check(st.Error == "Не удалось запустить: нет доступа к папке" && st.ErrorDetail == "denied", "an error after a colon continues in lower case, got " + st.Error);
+                st.Clear();
+                Check(st.Error == null && st.ErrorDetail == null, "clearing an error clears its details");
+                Check(!st.Launching, "nothing is launching by default");
+                st.LaunchUntil = DateTime.UtcNow.AddSeconds(6);
+                Check(st.Launching, "an app is launching until it is seen running");
+                st.Running = true;
+                Check(!st.Launching, "a running app is no longer launching");
+
+                double x = 5000, y = -300, w = 3000, h = 200;
+                State.Fit(ref x, ref y, ref w, ref h, 0, 0, 1920, 1040, 1000, 600);
+                Check(w == 1920 && h == 600 && x == 0 && y == 0, "a window is brought back onto the screen, got " + x + "," + y + " " + w + "x" + h);
+                x = 300; y = 200; w = 1200; h = 700;
+                State.Fit(ref x, ref y, ref w, ref h, 0, 0, 1920, 1040, 1000, 600);
+                Check(x == 300 && y == 200 && w == 1200 && h == 700, "a window that fits stays where it was");
+                x = -1900; y = 500; w = 1120; h = 720;
+                State.Fit(ref x, ref y, ref w, ref h, -1920, 0, 1920, 1040, 1000, 600);
+                Check(x == -1900 && y == 320, "a window on the left monitor stays there, got " + x + "," + y);
+
+                Check(MainWindow.Columns(640) == 1 && MainWindow.Columns(860) == 2 && MainWindow.Columns(1239) == 2 && MainWindow.Columns(1600) == 3, "card columns follow the width");
+                Check(MainWindow.AllLost(5, 5) && !MainWindow.AllLost(5, 4) && !MainWindow.AllLost(0, 0), "no connection is reported only when every request failed");
+                Check(MainWindow.AccentOf(null) == Tokens.Palette.Brand && MainWindow.AccentOf("") == Tokens.Palette.Brand && MainWindow.AccentOf("nonsense") == Tokens.Palette.Brand
+                    && MainWindow.AccentOf("#0A84FF") == System.Windows.Media.Color.FromRgb(0x0A, 0x84, 0xFF), "the accent falls back to the brand colour");
+                var order = MainWindow.MergeOrder(new string[] { "new", "aura", "dock" }, new string[] { "aura", "gone-busy", "gone-idle", "dock" }, delegate(string id) { return id == "gone-busy" || id == "aura"; });
+                Check(string.Join(",", order.ToArray()) == "new,aura,dock,gone-busy", "a catalogue update keeps a card that is still working, got " + string.Join(",", order.ToArray()));
+
+                Status.Kind kind;
+                Check(ScenariosPage.Note(true, false, new string[] { "arkada.txt" }, out kind) == "не работает: нет arkada.txt" && kind == Status.Kind.Warn, "an enabled scenario without its apps says it does not work");
+                Check(ScenariosPage.Note(true, true, new string[0], out kind) == "действует сейчас" && kind == Status.Kind.Ok, "an active scenario says so");
+                Check(ScenariosPage.Note(false, false, new string[] { "maska.txt", "aura.txt" }, out kind) == "не подключены: maska.txt, aura.txt" && kind == Status.Kind.None, "a disabled scenario only names what is missing");
+                Check(ScenariosPage.Note(true, false, new string[0], out kind) == null && ScenariosPage.Note(false, false, null, out kind) == null, "a scenario that simply waits says nothing");
+
+                Check(!SettingsPage.UseChips(new string[] { "Обычный", "Жёсткий" }) && !SettingsPage.UseChips(new string[] { "Не выравнивать", "−18 LUFS", "−16 LUFS", "−14 LUFS" }), "short choices sit in a row");
+                Check(SettingsPage.UseChips(new string[] { "dock.txt", "Компактная панель Windows", "dock.txt и панель Windows" }) && SettingsPage.UseChips(new string[] { "1", "2", "3", "4", "5" }), "long or many choices become chips");
+                var item = Json.Parse("{\"key\":\"bar\",\"type\":\"choice\",\"label\":\"Внизу\",\"hint\":\"a\",\"value\":\"dock\",\"options\":[{\"value\":\"dock\",\"label\":\"dock.txt\"},{\"value\":\"both\",\"label\":\"Оба\"}]}");
+                string sig = SettingsPage.ItemSig(item);
+                item["value"] = "both"; item["hint"] = "b";
+                Check(SettingsPage.ItemSig(item) == sig, "a new value or hint does not rebuild the settings row");
+                item["label"] = "Вверху";
+                Check(SettingsPage.ItemSig(item) != sig, "a new label does rebuild it");
             }
 
             // Замена файла программы: новая версия ложится на место старой, лишнего рядом не остаётся

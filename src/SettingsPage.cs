@@ -54,53 +54,141 @@ namespace DevTxt.Core
         static object Get(Dictionary<string, object> d, string key) { object v; return d.TryGetValue(key, out v) ? v : null; }
         static bool Same(object a, object b) { return Convert.ToString(a, CultureInfo.InvariantCulture) == Convert.ToString(b, CultureInfo.InvariantCulture); }
 
-        // Одна настройка приложения — по её описанию
-        void Item(AppEntry app, Dictionary<string, object> it)
+        // Раздел собирается заново, только когда изменился его состав (набор строк). Всё остальное меняется на месте:
+        // тогда переключатель доезжает до конца, а фокус с клавиатуры остаётся там, где был.
+        readonly List<Action> onFacts = new List<Action>();    // подписи, кнопки, кольцо цвета — сразу
+        readonly List<Action> onValues = new List<Action>();   // положение переключателей и выбора — см. touched ниже
+        string drawnSig;
+
+        Dictionary<string, object> SettingsOf(string appId)
         {
-            string key = Json.Str(it, "key"), type = Json.Str(it, "type"), label = Json.Str(it, "label") ?? key, hint = Json.Str(it, "hint");
+            object data;
+            w.States.TryGetValue(appId + ".settings", out data);
+            return data as Dictionary<string, object>;
+        }
+
+        // Описание одной настройки приложения, как оно выглядит прямо сейчас; null — такой настройки нет
+        Dictionary<string, object> FindItem(string appId, string key)
+        {
+            Dictionary<string, object> found = null;
+            foreach (object g in Json.List(SettingsOf(appId), "groups"))
+                foreach (object o in Json.List(g as Dictionary<string, object>, "items"))
+                {
+                    var it = o as Dictionary<string, object>;
+                    if (it != null && Json.Str(it, "key") == key) found = it;
+                }
+            return found;
+        }
+
+        // Выбор из вариантов: короткие подписи встают в ряд справа, длинные или многочисленные — плашками под названием
+        public static bool UseChips(IList<string> labels)
+        {
+            if (labels.Count > 4) return true;
+            int total = 0;
+            foreach (string s in labels)
+            {
+                if (s.Length > 18) return true;
+                total += s.Length;
+            }
+            return total > 40;
+        }
+
+        // Всё, от чего зависит, из чего собрана строка настройки. Значение и подсказка сюда не входят — они меняются на месте.
+        public static string ItemSig(Dictionary<string, object> it)
+        {
+            var parts = new List<string> { Json.Str(it, "key"), Json.Str(it, "type"), Json.Str(it, "label"), Json.Str(it, "unit"), Json.Str(it, "button"),
+                Convert.ToString(Get(it, "min"), CultureInfo.InvariantCulture), Convert.ToString(Get(it, "max"), CultureInfo.InvariantCulture), Convert.ToString(Get(it, "step"), CultureInfo.InvariantCulture) };
+            foreach (object o in Json.List(it, "options"))
+            {
+                var opt = o as Dictionary<string, object>;
+                if (opt != null) parts.Add(Convert.ToString(Get(opt, "value"), CultureInfo.InvariantCulture) + "=" + Json.Str(opt, "label"));
+            }
+            return string.Join("\u0001", parts.ToArray());
+        }
+
+        void Item(AppEntry app, Dictionary<string, object> it) { Item(app, it, null); }
+
+        // Одна настройка приложения — по её описанию. title — своё название вместо присланного.
+        void Item(AppEntry app, Dictionary<string, object> it, string title)
+        {
+            string key = Json.Str(it, "key"), type = Json.Str(it, "type"), label = title ?? Json.Str(it, "label") ?? key, hint = Json.Str(it, "hint");
             if (key == null || type == null) return;
             object value = Get(it, "value");
-            Action<object> set = delegate(object v) { w.SendCommand(app.Id, "settings.set", Hub.Msg("key", key, "value", v)); };
+            string appId = app.Id;
+            Action<object> set = delegate(object v) { w.SendCommand(appId, "settings.set", Hub.Msg("key", key, "value", v)); };
+            Func<Dictionary<string, object>> now = delegate { return FindItem(appId, key); };
+            RowRef row = null;
 
-            if (type == "switch") Row(label, hint, new Switch(value is bool && (bool)value, delegate(bool on) { set(on); }).Root);
+            if (type == "switch")
+            {
+                var sw = new Switch(value is bool && (bool)value, delegate(bool on) { set(on); });
+                row = Row(label, hint, sw.Root);
+                onValues.Add(delegate { var cur = now(); if (cur != null) { object v = Get(cur, "value"); sw.Value = v is bool && (bool)v; } });
+            }
             else if (type == "choice")
             {
-                var values = new List<object>();
+                var vals = new List<object>();
                 var labels = new List<string>();
                 foreach (object o in Json.List(it, "options"))
                 {
                     var opt = o as Dictionary<string, object>;
                     if (opt == null) continue;
-                    values.Add(Get(opt, "value"));
+                    vals.Add(Get(opt, "value"));
                     labels.Add(Json.Str(opt, "label") ?? Convert.ToString(Get(opt, "value"), CultureInfo.InvariantCulture));
                 }
-                if (values.Count == 0) return;
-                int current = Math.Max(0, values.FindIndex(delegate(object v) { return Same(v, value); }));
-                if (values.Count <= 4) Row(label, hint, new Seg(labels.ToArray(), current, delegate(int i) { set(values[i]); }).Root);
+                if (vals.Count == 0) return;
+                Func<int> current = delegate
+                {
+                    var cur = now();
+                    object v = cur != null ? Get(cur, "value") : value;
+                    return Math.Max(0, vals.FindIndex(delegate(object x) { return Same(x, v); }));
+                };
+                if (!UseChips(labels))
+                {
+                    var seg = new Seg(labels.ToArray(), current(), delegate(int i) { set(vals[i]); });
+                    row = Row(label, hint, seg.Root);
+                    onValues.Add(delegate { seg.Index = current(); });
+                }
                 else
                 {
-                    // Вариантов много — все на виду, плашками под названием
+                    // Вариантов много или подписи длинные — все на виду, плашками под названием
                     var chips = new WrapPanel { Margin = new Thickness(-3, 8, -3, -3) };
-                    for (int n = 0; n < values.Count; n++)
+                    var boxes = new List<Border>();
+                    int chosen = current();
+                    Action paint = delegate
                     {
-                        object v = values[n];
-                        bool on = n == current;
-                        var t = Ui.T(labels[n], Tokens.Size.Body, on ? Ui.Label : Ui.Label2, on ? FontWeights.SemiBold : FontWeights.Normal);
+                        for (int n = 0; n < boxes.Count; n++)
+                        {
+                            bool on = n == chosen;
+                            var t = (TextBlock)boxes[n].Child;
+                            t.Foreground = on ? Ui.Label : Ui.Label2;
+                            t.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
+                            boxes[n].Background = on ? Ui.GlassStrong : boxes[n].IsMouseOver ? Ui.GlassHover : Ui.GlassFill;
+                            boxes[n].BorderBrush = on ? Ui.Rim : Brushes.Transparent;
+                        }
+                    };
+                    for (int n = 0; n < vals.Count; n++)
+                    {
+                        int index = n;
+                        var t = Ui.T(labels[n], Tokens.Size.Body, Ui.Label2, FontWeights.Normal);
                         t.VerticalAlignment = VerticalAlignment.Center;
                         var chip = new Border
                         {
                             Height = 28, CornerRadius = new CornerRadius(14), Padding = new Thickness(13, 0, 13, 1), Margin = new Thickness(3), BorderThickness = new Thickness(1),
-                            Background = on ? Ui.GlassStrong : Ui.GlassFill, BorderBrush = on ? Ui.Rim : Brushes.Transparent, Child = t, Cursor = Cursors.Hand
+                            Child = t, Cursor = Cursors.Hand
                         };
-                        if (!on)
-                        {
-                            chip.MouseEnter += delegate { chip.Background = Ui.GlassHover; };
-                            chip.MouseLeave += delegate { chip.Background = Ui.GlassFill; };
-                            chip.MouseLeftButtonDown += delegate { set(v); };
-                        }
+                        // Нажали — плашка выбрана сразу, не дожидаясь ответа приложения
+                        Action pick = delegate { if (chosen == index) return; chosen = index; paint(); set(vals[index]); };
+                        chip.MouseEnter += delegate { paint(); };
+                        chip.MouseLeave += delegate { paint(); };
+                        chip.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; pick(); };
+                        Ui.Keyboard(chip, pick);
+                        boxes.Add(chip);
                         chips.Children.Add(chip);
                     }
-                    Row(label, hint, null, chips);
+                    paint();
+                    row = Row(label, hint, null, chips);
+                    onValues.Add(delegate { int c = current(); if (c != chosen) { chosen = c; paint(); } });
                 }
             }
             else if (type == "slider")
@@ -114,64 +202,130 @@ namespace DevTxt.Core
                 number.Text = show(slider.Value);
                 slider.Root.MouseMove += delegate { number.Text = show(slider.Value); };
                 slider.Root.MouseLeftButtonDown += delegate { number.Text = show(slider.Value); };
-                Row(label, hint, new StackPanel { Orientation = Orientation.Horizontal, Children = { number, slider.Root } });
+                row = Row(label, hint, new StackPanel { Orientation = Orientation.Horizontal, Children = { number, slider.Root } });
+                onValues.Add(delegate
+                {
+                    var cur = now();
+                    if (cur == null || slider.Root.IsMouseCaptured) return;   // бегунок в руке — не выдёргиваем
+                    slider.Value = Num(Get(cur, "value"), min);
+                    number.Text = show(slider.Value);
+                });
             }
             else if (type == "action")
             {
                 var b = new Btn();
-                b.Set(Json.Str(it, "button") ?? "Выполнить", null, true, delegate { w.SendCommand(app.Id, "settings.run", Hub.Msg("key", key)); });
-                Row(label, hint, b.Root);
+                b.Set(Json.Str(it, "button") ?? "Выполнить", null, true, delegate { w.SendCommand(appId, "settings.run", Hub.Msg("key", key)); });
+                row = Row(label, hint, b.Root);
             }
             // Вид настройки, которого эта версия core.txt не знает, пропускается
+            if (row != null) onFacts.Add(delegate { var cur = now(); if (cur != null) row.SetHint(Json.Str(cur, "hint")); });
+        }
+
+        // Чем сейчас показана замена: "install" — приложения нет, "open" — не запущено, "item" — его настройка; null — такого приложения нет
+        string ReplaceKind(string appId, string key, out Card card, out Dictionary<string, object> found)
+        {
+            found = null;
+            card = w.Cards.Find(delegate(Card c) { return c.App.Id == appId; });
+            if (card == null) return null;
+            if (!card.S.Installed) return "install";
+            found = FindItem(appId, key);
+            return found == null ? "open" : "item";
+        }
+
+        // Кнопка, которая открывает приложение: пока оно запускается, она это и говорит
+        void OpenButton(Btn b, Card card, string label, Color? tint)
+        {
+            Action paint = delegate
+            {
+                if (card.S.Launching) b.Set("Запускается…", null, false, null);
+                else b.Set(label, tint, true, delegate { w.Open(card); });
+            };
+            paint();
+            onFacts.Add(paint);
         }
 
         // Одна замена: настройка самого приложения под понятным названием; приложения нет — «Установить», не запущено — «Открыть»
         void Replacement(string what, string appId, string key)
         {
-            Card card = w.Cards.Find(delegate(Card c) { return c.App.Id == appId; });
-            if (card == null) return;
+            Card card;
+            Dictionary<string, object> found;
+            string kind = ReplaceKind(appId, key, out card, out found);
+            if (kind == null) return;
             string name = card.App.Name.ToLowerInvariant() + ".txt";
-            if (!card.S.Installed)
+            if (kind == "install")
             {
                 var b = new Btn();
-                b.Set("Установить", Ui.Accent, card.S.Phase == Phase.Idle, delegate { w.InstallId(appId); });
+                Action paint = delegate
+                {
+                    bool idle = card.S.Phase == Phase.Idle;
+                    b.Set(idle ? "Установить" : "Установка…", idle ? (Color?)Ui.Accent : null, idle, delegate { w.InstallId(appId); });
+                };
+                paint();
+                onFacts.Add(paint);
                 Row(what, "Заменяет " + name + ". Пока его нет, работает то, что в Windows", b.Root);
-                return;
             }
-            object data;
-            w.States.TryGetValue(appId + ".settings", out data);
-            Dictionary<string, object> found = null;
-            var settings = data as Dictionary<string, object>;
-            if (settings != null)
-                foreach (object g in Json.List(settings, "groups"))
-                    foreach (object o in Json.List(g as Dictionary<string, object>, "items"))
-                    {
-                        var it = o as Dictionary<string, object>;
-                        if (it != null && Json.Str(it, "key") == key) found = it;
-                    }
-            if (found == null)
+            else if (kind == "open")
             {
                 var b = new Btn();
-                b.Set("Открыть " + name, null, true, delegate { w.Open(card); });
+                OpenButton(b, card, "Открыть " + name, null);
                 Row(what, name + " не запущен — пока он закрыт, работает то, что в Windows", b.Root);
-                return;
             }
-            var copy = new Dictionary<string, object>(found);
-            copy["label"] = what + " — " + name;
-            Item(card.App, copy);
+            else Item(card.App, found, what + " — " + name);
         }
 
         // Какой раздел показан: «general», «replace» или «app:<id>»
         public string Section = "general";
         string shownSection;
 
-        // Пока человек только что нажал переключатель, страницу не перестраиваем: иначе ответ приложения
-        // приходит посреди движения бегунка, и тот прыгает на место вместо того, чтобы доехать.
+        // Пока человек только что нажал переключатель, его положение не трогаем: иначе ответ приложения приходит
+        // посреди движения бегунка, и тот прыгает на место вместо того, чтобы доехать. Подписи и кнопки меняются сразу.
         DateTime touched = DateTime.MinValue;
         System.Windows.Threading.DispatcherTimer later;
         bool hooked;
 
-        // ───────── Раздел заново — по текущему состоянию ─────────
+        // Из чего сейчас должен состоять раздел. Пока это не изменилось, раздел не собирается заново.
+        string Signature()
+        {
+            if (Section == "general") return "general";
+            var parts = new List<string> { Section };
+            if (Section == "replace")
+            {
+                foreach (string[] r in Replaced)
+                {
+                    Card card;
+                    Dictionary<string, object> found;
+                    string kind = ReplaceKind(r[1], r[2], out card, out found);
+                    parts.Add(kind == "item" ? ItemSig(found) : kind ?? "");
+                }
+                return string.Join("\u0002", parts.ToArray());
+            }
+            Card c = w.Cards.Find(delegate(Card x) { return "app:" + x.App.Id == Section; });
+            if (c == null) return Section + "|none";
+            var settings = SettingsOf(c.App.Id);
+            if (settings == null) return Section + (!c.App.HasExe || !c.S.Installed ? "|none" : c.S.Running ? "|silent" : "|closed");
+            foreach (object g in Json.List(settings, "groups"))
+            {
+                var group = g as Dictionary<string, object>;
+                if (group == null) continue;
+                parts.Add("#" + Json.Str(group, "title"));
+                foreach (object i in Json.List(group, "items"))
+                {
+                    var it = i as Dictionary<string, object>;
+                    if (it != null) parts.Add(ItemSig(it));
+                }
+            }
+            return string.Join("\u0002", parts.ToArray());
+        }
+
+        // Что из Windows заменяют приложения: название, приложение, его настройка
+        static readonly string[][] Replaced =
+        {
+            new string[] { "Панель задач", "dock", "bar" },
+            new string[] { "Кнопка «Пуск»", "dock", "winKey" },
+            new string[] { "Переключение окон Alt+Tab", "smena", "replace" },
+        };
+
+        // ───────── Раздел — по текущему состоянию ─────────
         public void Render()
         {
             if (!hooked)
@@ -180,85 +334,111 @@ namespace DevTxt.Core
                 Root.PreviewMouseLeftButtonDown += delegate { touched = DateTime.UtcNow; };
                 Root.PreviewKeyDown += delegate { touched = DateTime.UtcNow; };
             }
+            string sig = Signature();
             double wait = 400 - (DateTime.UtcNow - touched).TotalMilliseconds;
-            if (wait > 0 && shownSection == Section)
+            bool same = sig == drawnSig && shownSection == Section;
+            if (same || wait > 0 && shownSection == Section)
             {
-                if (later == null) { later = new System.Windows.Threading.DispatcherTimer(); later.Tick += delegate { later.Stop(); Render(); }; }
-                later.Stop(); later.Interval = TimeSpan.FromMilliseconds(wait); later.Start();
+                foreach (var a in onFacts.ToArray()) a();
+                if (wait > 0)
+                {
+                    if (later == null) { later = new System.Windows.Threading.DispatcherTimer(); later.Tick += delegate { later.Stop(); Render(); }; }
+                    later.Stop(); later.Interval = TimeSpan.FromMilliseconds(wait); later.Start();
+                }
+                else foreach (var a in onValues.ToArray()) a();
                 return;
             }
+
             double offset = shownSection == Section ? Root.VerticalOffset : 0;
             shownSection = Section;
+            drawnSig = sig;
             stack.Children.Clear();
-            if (Section == "replace")
-            {
-                Replacement("Панель задач", "dock", "bar");
-                Replacement("Кнопка «Пуск»", "dock", "winKey");
-                Replacement("Переключение окон Alt+Tab", "smena", "replace");
-                Root.ScrollToVerticalOffset(offset);
-                return;
-            }
-            bool general = Section == "general";
-            if (general) {
+            onFacts.Clear();
+            onValues.Clear();
+            if (Section == "replace") foreach (string[] r in Replaced) Replacement(r[0], r[1], r[2]);
+            else if (Section == "general") General();
+            else AppSection();
+            Root.ScrollToVerticalOffset(offset);
+        }
 
+        void General()
+        {
             Title("Вид");
             Row("Акцентный цвет", "Один цвет для всех приложений — или свой у каждого", Swatches());
-            Row("Меньше движения", "Без пружин и плавных переходов во всех приложениях", new Switch(State.ReducedMotion, delegate(bool on) { w.SetTheme(null, on); }).Root);
+            onFacts.Add(PaintSwatches);
+            var motion = new Switch(State.ReducedMotion, delegate(bool on) { w.SetTheme(null, on); });
+            Row("Меньше движения", "Без пружин и плавных переходов во всех приложениях", motion.Root);
 
             Title("Запуск");
-            Row("Запускать core.txt вместе с Windows", "Тихо, в трее: приложения сразу видят друг друга и общие настройки", new Switch(w.DemoMode ? true : Autostart.Enabled, delegate(bool on) { if (!w.DemoMode) Autostart.Set(on); }).Root);
-            Row("Оставаться в трее после закрытия окна", "Иначе core.txt закрывается совсем, и связь между приложениями пропадает", new Switch(State.Tray, delegate(bool on) { State.Tray = on; if (!w.DemoMode) State.Save(); }).Root);
+            var auto = new Switch(w.DemoMode ? true : Autostart.Enabled, delegate(bool on) { if (!w.DemoMode) Autostart.Set(on); });
+            Row("Запускать core.txt вместе с Windows", "Тихо, в трее: приложения сразу видят друг друга и общие настройки", auto.Root);
+            var tray = new Switch(State.Tray, delegate(bool on) { State.Tray = on; if (!w.DemoMode) State.Save(); });
+            Row("Оставаться в трее после закрытия окна", "Иначе core.txt закрывается совсем, и связь между приложениями пропадает", tray.Root);
 
             Title("Папка");
-            int outside = w.OutsideCount();
             var home = new Btn();
-            if (outside > 0) home.Set("Собрать", Tokens.Palette.Brand, true, delegate { w.GatherAll(); });
-            else home.Set("Открыть папку", null, true, delegate { w.OpenHome(); });
-            Row("Все приложения в одной папке", outside > 0
-                ? "Не в общей папке dev.txt: " + outside + ". Перенос закроет и снова запустит эти приложения; aura.txt остаётся там, куда её поставил установщик"
-                : "Приложения dev.txt лежат вместе, в папке программ dev.txt", home.Root);
+            var homeRow = Row("Все приложения в одной папке", "", home.Root);
+            Action paintHome = delegate
+            {
+                int outside = w.OutsideCount();
+                // Пока идёт перенос, кнопка не нажимается: второй перенос поверх первого не начнётся
+                if (w.GatherBusy) home.Set("Переносится…", null, false, null);
+                else if (outside > 0) home.Set("Собрать", Ui.Accent, true, delegate { w.GatherAll(); });
+                else home.Set("Открыть папку", null, true, delegate { w.OpenHome(); });
+                homeRow.SetHint(outside > 0
+                    ? "Не в общей папке dev.txt: " + outside + ". Перенос закроет и снова запустит эти приложения; aura.txt остаётся там, куда её поставил установщик"
+                    : "Приложения dev.txt лежат вместе, в папке программ dev.txt");
+            };
+            paintHome();
+            onFacts.Add(paintHome);
 
             Title("Обновления");
-            Row("Проверять обновления при запуске", null, new Switch(State.AutoCheck, delegate(bool on) { State.AutoCheck = on; if (!w.DemoMode) State.Save(); }).Root);
-            }
+            var check = new Switch(State.AutoCheck, delegate(bool on) { State.AutoCheck = on; if (!w.DemoMode) State.Save(); });
+            Row("Проверять обновления при запуске", null, check.Root);
 
-            foreach (var c in w.Cards)
+            onValues.Add(delegate
             {
-                var card = c;
-                object data;
-                w.States.TryGetValue(c.App.Id + ".settings", out data);
-                var settings = data as Dictionary<string, object>;
-                if (Section != "app:" + c.App.Id) continue;   // в этом разделе — одно приложение
-                if (settings == null && (!c.App.HasExe || !c.S.Installed)) continue;   // показывать нечего
-                if (settings == null)
+                motion.Value = State.ReducedMotion;
+                auto.Value = w.DemoMode ? true : Autostart.Enabled;
+                tray.Value = State.Tray;
+                check.Value = State.AutoCheck;
+            });
+        }
+
+        // Раздел одного приложения: то, что оно само прислало хабу
+        void AppSection()
+        {
+            Card c = w.Cards.Find(delegate(Card x) { return "app:" + x.App.Id == Section; });
+            if (c == null) return;
+            var settings = SettingsOf(c.App.Id);
+            if (settings == null)
+            {
+                if (!c.App.HasExe || !c.S.Installed) return;   // показывать нечего
+                var b = new Btn();
+                if (c.S.Running)
                 {
-                    var b = new Btn();
-                    if (c.S.Running)
-                    {
-                        b.Set("Открыть", null, true, delegate { w.Open(card); });
-                        Row("Эта версия ещё не передаёт настройки в core.txt", "Пока они меняются в самом приложении", b.Root);
-                    }
-                    else
-                    {
-                        b.Set("Запустить", c.App.Color, true, delegate { w.Open(card); });
-                        Row("Приложение не запущено", "Его настройки появятся здесь, как только оно заработает", b.Root);
-                    }
-                    continue;
+                    OpenButton(b, c, "Открыть", null);
+                    Row("Эта версия ещё не передаёт настройки в core.txt", "Пока они меняются в самом приложении", b.Root);
                 }
-                foreach (object g in Json.List(settings, "groups"))
+                else
                 {
-                    var group = g as Dictionary<string, object>;
-                    if (group == null) continue;
-                    string title = Json.Str(group, "title");
-                    if (!string.IsNullOrEmpty(title)) Title(title);
-                    foreach (object i in Json.List(group, "items"))
-                    {
-                        var it = i as Dictionary<string, object>;
-                        if (it != null) Item(c.App, it);
-                    }
+                    OpenButton(b, c, "Запустить", c.App.Color);
+                    Row("Приложение не запущено", "Его настройки появятся здесь, как только оно заработает", b.Root);
+                }
+                return;
+            }
+            foreach (object g in Json.List(settings, "groups"))
+            {
+                var group = g as Dictionary<string, object>;
+                if (group == null) continue;
+                string title = Json.Str(group, "title");
+                if (!string.IsNullOrEmpty(title)) Title(title);
+                foreach (object i in Json.List(group, "items"))
+                {
+                    var it = i as Dictionary<string, object>;
+                    if (it != null) Item(c.App, it);
                 }
             }
-            Root.ScrollToVerticalOffset(offset);
         }
     }
 }

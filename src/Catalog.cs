@@ -210,6 +210,10 @@ namespace DevTxt.Core
         public static bool AutoCheck = true;      // проверять обновления при запуске
         public static bool Onboarded;             // первый запуск пройден
         public static bool GatherPending;         // после установки core.txt перенести приложения в общий дом
+        public static bool TrayHint;              // про то, что core.txt остаётся в трее, уже сказали
+        public static string Section;             // раздел, открытый в прошлый раз
+        public static double WinX = double.NaN, WinY = double.NaN, WinW, WinH;   // где и какого размера было окно
+        public static bool WinMax;
         public static readonly HashSet<string> Scenarios = new HashSet<string>();   // включённые сценарии
         public static List<string> Pending = new List<string>();                    // что поставить после первого запуска
 
@@ -217,6 +221,23 @@ namespace DevTxt.Core
         {
             object v;
             return d != null && d.TryGetValue(key, out v) && v is bool ? (bool)v : fallback;
+        }
+
+        static double Number(Dictionary<string, object> d, string key, double fallback)
+        {
+            object v;
+            if (d == null || !d.TryGetValue(key, out v) || v == null || v is string || v is bool) return fallback;
+            try { double n = Convert.ToDouble(v, System.Globalization.CultureInfo.InvariantCulture); return double.IsNaN(n) || double.IsInfinity(n) ? fallback : n; } catch { return fallback; }
+        }
+
+        // Окно возвращается туда, где было, но целиком на экран: не больше рабочей области и не за её краем.
+        // (sx, sy, sw, sh) — рабочая область экрана. Размер меньше наименьшего не берётся.
+        public static void Fit(ref double x, ref double y, ref double w, ref double h, double sx, double sy, double sw, double sh, double minW, double minH)
+        {
+            w = Math.Min(Math.Max(w, minW), Math.Max(sw, 1));
+            h = Math.Min(Math.Max(h, minH), Math.Max(sh, 1));
+            x = Math.Max(sx, Math.Min(x, sx + sw - w));
+            y = Math.Max(sy, Math.Min(y, sy + sh - h));
         }
 
         public static void Load()
@@ -244,6 +265,13 @@ namespace DevTxt.Core
                 AutoCheck = Flag(set, "autoCheck", true);
                 Onboarded = Flag(set, "onboarded", false);
                 GatherPending = Flag(set, "gather", false);
+                TrayHint = Flag(set, "trayHint", false);
+                string section = Json.Str(set, "section");
+                Section = section != null && System.Text.RegularExpressions.Regex.IsMatch(section, "^(apps|scenarios|general|replace|app:[a-z][a-z0-9-]{0,31})$") ? section : null;
+                var win = Json.Obj(d, "window");
+                WinX = Number(win, "x", double.NaN); WinY = Number(win, "y", double.NaN);
+                WinW = Number(win, "w", 0); WinH = Number(win, "h", 0);
+                WinMax = Flag(win, "max", false);
                 foreach (object o in Json.List(d, "scenarios")) if (o is string) Scenarios.Add((string)o);
                 foreach (object o in Json.List(d, "pending")) if (o is string) Pending.Add((string)o);
             }
@@ -256,9 +284,12 @@ namespace DevTxt.Core
             {
                 var latest = new Dictionary<string, object>();
                 foreach (var p in Latest) latest[p.Key] = p.Value.ToDict();
-                var set = new Dictionary<string, object> { { "accent", Accent }, { "reducedMotion", ReducedMotion }, { "tray", Tray }, { "autoCheck", AutoCheck }, { "onboarded", Onboarded }, { "gather", GatherPending } };
+                var set = new Dictionary<string, object> { { "accent", Accent }, { "reducedMotion", ReducedMotion }, { "tray", Tray }, { "autoCheck", AutoCheck }, { "onboarded", Onboarded }, { "gather", GatherPending },
+                    { "trayHint", TrayHint }, { "section", Section } };
                 var d = new Dictionary<string, object> { { "paths", Paths }, { "latest", latest }, { "checked", Checked.Ticks.ToString() }, { "settings", set },
                     { "scenarios", new List<string>(Scenarios) }, { "pending", Pending } };
+                if (WinW > 0 && WinH > 0 && !double.IsNaN(WinX) && !double.IsNaN(WinY))
+                    d["window"] = new Dictionary<string, object> { { "x", Math.Round(WinX) }, { "y", Math.Round(WinY) }, { "w", Math.Round(WinW) }, { "h", Math.Round(WinH) }, { "max", WinMax } };
                 Directory.CreateDirectory(Dir);
                 File.WriteAllText(FilePath, Json.Write(d), Encoding.UTF8);
             }

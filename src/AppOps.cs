@@ -17,11 +17,77 @@ namespace DevTxt.Core
         public bool Running;
         public Release Latest;
         public string Error;
+        public string ErrorDetail;   // исходный текст ошибки — для подсказки; null, если добавить нечего
         public Phase Phase;
         public double Progress;
+        public long Done, Total;     // сколько байт скачано и сколько всего
+        public DateTime LaunchUntil; // «Открыть» нажали: до этого времени ждём, пока приложение появится среди запущенных
+
+        public bool Launching { get { return !Running && LaunchUntil > DateTime.UtcNow; } }
+        public void Fail(Exception e) { Error = Errors.Short(e); ErrorDetail = Errors.Detail(e); }
+        public void Fail(string prefix, Exception e) { Error = prefix + ": " + Errors.Lower(Errors.Short(e)); ErrorDetail = Errors.Detail(e); }
+        public void Clear() { Error = null; ErrorDetail = null; }
 
         public bool Installed { get { return Path != null; } }
         public bool UpdateAvailable { get { return Installed && Version != null && Latest != null && Latest.Version > Version; } }
+    }
+
+    // Ошибки для человека: короткая фраза по-русски вместо текста исключения. Сам текст остаётся для подсказки.
+    static class Errors
+    {
+        public const string Offline = "Нет связи с GitHub — проверьте интернет";
+        public const string Busy = "Файл занят — закройте приложение";
+        public const string Denied = "Нет доступа к папке";
+        public const string Checksum = "Контрольная сумма не совпала";
+        public const string Unknown = "Что-то пошло не так";
+
+        static bool Russian(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            foreach (char c in s) if (c >= 'а' && c <= 'я' || c >= 'А' && c <= 'Я' || c == 'ё' || c == 'Ё') return true;
+            return false;
+        }
+
+        public static string Short(Exception e)
+        {
+            if (e == null) return Unknown;
+            // Свои сообщения уже написаны по-русски и для человека
+            if (Russian(e.Message) && e.GetType() == typeof(Exception)) return e.Message.IndexOf("онтрольная сумма", StringComparison.Ordinal) >= 0 ? Checksum : e.Message;
+            for (Exception x = e; x != null; x = x.InnerException)
+            {
+                if (x is System.Net.WebException || x is System.Net.Sockets.SocketException || x is TimeoutException) return Offline;
+                if (x is UnauthorizedAccessException || x is System.Security.SecurityException) return Denied;
+                var win = x as System.ComponentModel.Win32Exception;
+                if (win != null)
+                {
+                    if (win.NativeErrorCode == 5) return Denied;
+                    if (win.NativeErrorCode == 32 || win.NativeErrorCode == 33) return Busy;
+                    if (win.NativeErrorCode == 2 || win.NativeErrorCode == 3) return "Файл не найден";
+                    if (win.NativeErrorCode == 1223) return "Вы отменили действие";
+                }
+                if (x is FileNotFoundException || x is DirectoryNotFoundException) return "Файл не найден";
+                if (x is PathTooLongException) return "Слишком длинный путь к папке";
+                if (x is IOException)
+                {
+                    int code = x.HResult & 0xFFFF;
+                    if (code == 32 || code == 33) return Busy;
+                    if (code == 112 || code == 39) return "Не хватает места на диске";
+                    if (code == 5) return Denied;
+                }
+                if (x is InvalidDataException) return "Скачанный файл повреждён";
+            }
+            return Russian(e.Message) ? e.Message : Unknown;
+        }
+
+        // Что показать в подсказке: исходный текст, если он говорит больше короткой фразы
+        public static string Detail(Exception e)
+        {
+            if (e == null || string.IsNullOrEmpty(e.Message)) return null;
+            return e.Message == Short(e) ? null : e.Message;
+        }
+
+        // После двоеточия фраза продолжается со строчной: «Не удалось обновить core.txt: нет связи…»
+        public static string Lower(string s) { return string.IsNullOrEmpty(s) ? s : char.ToLowerInvariant(s[0]) + s.Substring(1); }
     }
 
     static class AppOps

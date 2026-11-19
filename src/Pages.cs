@@ -19,7 +19,7 @@ namespace DevTxt.Core
         protected Page(MainWindow w)
         {
             this.w = w;
-            Root = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Padding = new Thickness(25, 0, 25, 0), Content = stack, Focusable = false, Visibility = Visibility.Collapsed };
+            Root = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(25, 0, 25, 0), Content = stack, Focusable = false, Visibility = Visibility.Collapsed };
         }
 
         // Появление страницы: строки поднимаются волной. Только по действию человека, не при каждом обновлении.
@@ -32,19 +32,33 @@ namespace DevTxt.Core
             (target ?? stack).Children.Add(t);
         }
 
-        protected void Row(string label, string hint, FrameworkElement control) { Row(label, hint, control, null); }
+        // Строка, которую потом можно поправить на месте, не собирая страницу заново
+        protected class RowRef
+        {
+            public Border Root;
+            public StackPanel Text;
+            public TextBlock Label, Hint;
+
+            public void SetHint(string hint)
+            {
+                Motion.Swap(Hint, hint ?? "");
+                Hint.Visibility = string.IsNullOrEmpty(hint) ? Visibility.Collapsed : Visibility.Visible;
+            }
+        }
+
+        protected RowRef Row(string label, string hint, FrameworkElement control) { return Row(label, hint, control, null); }
 
         // below — что-то широкое под названием (например, плашки вариантов)
-        protected void Row(string label, string hint, FrameworkElement control, FrameworkElement below)
+        protected RowRef Row(string label, string hint, FrameworkElement control, FrameworkElement below)
         {
             var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
-            text.Children.Add(Ui.T(label, Tokens.Size.Body, Ui.Label, FontWeights.Normal));
-            if (!string.IsNullOrEmpty(hint))
-            {
-                var h = Ui.T(hint, Tokens.Size.Micro, Ui.Label3, FontWeights.Normal);
-                h.TextWrapping = TextWrapping.Wrap; h.Margin = new Thickness(0, 1, 0, 0);
-                text.Children.Add(h);
-            }
+            var name = Ui.T(label, Tokens.Size.Body, Ui.Label, FontWeights.Normal);
+            name.TextWrapping = TextWrapping.Wrap;
+            text.Children.Add(name);
+            var h = Ui.T(hint ?? "", Tokens.Size.Micro, Ui.Label3, FontWeights.Normal);
+            h.TextWrapping = TextWrapping.Wrap; h.Margin = new Thickness(0, 1, 0, 0);
+            if (string.IsNullOrEmpty(hint)) h.Visibility = Visibility.Collapsed;
+            text.Children.Add(h);
             var line = new DockPanel { LastChildFill = true, MinHeight = 30 };
             if (control != null)
             {
@@ -58,6 +72,7 @@ namespace DevTxt.Core
             var row = Ui.Row(content);
             row.Margin = new Thickness(0, 0, 0, 8);
             (target ?? stack).Children.Add(row);
+            return new RowRef { Root = row, Text = text, Label = name, Hint = h };
         }
 
         // Шапка раздела приложения: значок и название с подписью
@@ -76,9 +91,21 @@ namespace DevTxt.Core
             stack.Children.Add(line);
         }
 
+        // Кружки выбора цвета, которые сейчас на странице, и цвет каждого ("#RRGGBB" или null — свой у каждого)
+        readonly List<Border> rings = new List<Border>();
+        readonly List<string> ringHex = new List<string>();
+
+        // Кольцо — вокруг выбранного цвета. Двигается сразу, на месте.
+        protected void PaintSwatches()
+        {
+            for (int i = 0; i < rings.Count; i++)
+                rings[i].BorderBrush = string.Equals(ringHex[i], State.Accent, StringComparison.OrdinalIgnoreCase) ? Ui.Label : Brushes.Transparent;
+        }
+
         // Выбор акцентного цвета: «свой у каждого» и пять общих
         protected FrameworkElement Swatches()
         {
+            rings.Clear(); ringHex.Clear();
             var row = new StackPanel { Orientation = Orientation.Horizontal };
             var colors = new Color?[] { null, Tokens.Palette.Brand, Tokens.Palette.Blue, Tokens.Palette.Purple, Tokens.Palette.Green, Tokens.Palette.Pink };
             var names = new string[] { "Свой у каждого приложения", "Оранжевый", "Синий", "Фиолетовый", "Зелёный", "Розовый" };
@@ -86,17 +113,20 @@ namespace DevTxt.Core
             {
                 Color? c = colors[i];
                 string hex = c.HasValue ? "#" + c.Value.R.ToString("X2") + c.Value.G.ToString("X2") + c.Value.B.ToString("X2") : null;
-                bool on = string.Equals(hex, State.Accent, StringComparison.OrdinalIgnoreCase);
                 var inner = new Border { Width = 18, Height = 18, CornerRadius = new CornerRadius(9), Background = c.HasValue ? Ui.Solid(c.Value) : Ui.GlassStrong, BorderBrush = c.HasValue ? null : Ui.Rim, BorderThickness = new Thickness(c.HasValue ? 0 : 1) };
                 var ring = new Border
                 {
-                    Width = 28, Height = 28, CornerRadius = new CornerRadius(14), BorderThickness = new Thickness(2), BorderBrush = on ? Ui.Label : Brushes.Transparent,
+                    Width = 28, Height = 28, CornerRadius = new CornerRadius(14), BorderThickness = new Thickness(2), BorderBrush = Brushes.Transparent,
                     Background = Brushes.Transparent, Child = inner, Cursor = Cursors.Hand, ToolTip = names[i], Margin = new Thickness(4, 0, 0, 0)
                 };
                 inner.HorizontalAlignment = HorizontalAlignment.Center; inner.VerticalAlignment = VerticalAlignment.Center;
-                ring.MouseLeftButtonDown += delegate { w.SetTheme(hex ?? "", null); };
+                Action pick = delegate { w.SetTheme(hex ?? "", null); PaintSwatches(); };
+                ring.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; pick(); };
+                Ui.Keyboard(ring, pick);
+                rings.Add(ring); ringHex.Add(hex);
                 row.Children.Add(ring);
             }
+            PaintSwatches();
             return row;
         }
 
@@ -118,25 +148,48 @@ namespace DevTxt.Core
     {
         public ScenariosPage(MainWindow w) : base(w) { }
 
+        // Строки собираются один раз и дальше меняются на месте: переключатель доезжает, фокус с клавиатуры не теряется
+        readonly List<Switch> switches = new List<Switch>();
+        readonly List<Status> notes = new List<Status>();
+
+        // Что сказать под сценарием: действует, не работает (включён, а приложений нет) или просто чего не хватает.
+        // missing — названия неподключённых приложений; null — сказать нечего.
+        public static string Note(bool enabled, bool active, string[] missing, out Status.Kind kind)
+        {
+            kind = Status.Kind.None;
+            if (active) { kind = Status.Kind.Ok; return "действует сейчас"; }
+            if (missing == null || missing.Length == 0) return null;
+            string names = string.Join(", ", missing);
+            if (enabled) { kind = Status.Kind.Warn; return "не работает: нет " + names; }
+            return (missing.Length == 1 ? "не подключено: " : "не подключены: ") + names;
+        }
+
         public void Render()
         {
-            double offset = Root.VerticalOffset;
-            stack.Children.Clear();
-            var intro = Ui.T("Приложения могут помогать друг другу сами. Включите то, что вам подходит: сценарий действует, пока верно его условие, а потом возвращает всё как было.", Tokens.Size.Body, Ui.Label2, FontWeights.Normal);
-            intro.TextWrapping = TextWrapping.Wrap; intro.Margin = new Thickness(4, 2, 4, 14);
-            stack.Children.Add(intro);
+            if (switches.Count == 0)
+                foreach (var s in Scenarios.All)
+                {
+                    var scenario = s;
+                    var sw = new Switch(State.Scenarios.Contains(s.Id), delegate(bool on) { w.SetScenario(scenario.Id, on); });
+                    var row = Row(s.Title, s.Hint, sw.Root);
+                    var note = new Status();
+                    note.Root.Margin = new Thickness(0, 5, 0, 0); note.Root.HorizontalAlignment = HorizontalAlignment.Left; note.Root.Visibility = Visibility.Collapsed;
+                    row.Text.Children.Add(note.Root);
+                    switches.Add(sw); notes.Add(note);
+                }
 
-            foreach (var s in Scenarios.All)
+            for (int i = 0; i < Scenarios.All.Length; i++)
             {
-                var scenario = s;
+                var s = Scenarios.All[i];
                 var missing = new List<string>();
-                foreach (string id in s.Needs) if (!w.Connected(id)) missing.Add(id);
-                string hint = s.Hint;
-                if (w.ScenarioActive(s.Id)) hint += " · действует сейчас";
-                else if (missing.Count > 0) hint += " · " + (missing.Count == 1 ? "не подключено: " : "не подключены: ") + Names(missing.ToArray());
-                Row(s.Title, hint, new Switch(State.Scenarios.Contains(s.Id), delegate(bool on) { w.SetScenario(scenario.Id, on); }).Root);
+                foreach (string id in s.Needs) if (!w.Connected(id)) missing.Add(Names(new string[] { id }));
+                bool enabled = State.Scenarios.Contains(s.Id);
+                Status.Kind kind;
+                string text = Note(enabled, w.ScenarioActive(s.Id), missing.ToArray(), out kind);
+                switches[i].Value = enabled;
+                if (text != null) notes[i].Set(text, kind);
+                Motion.Show(notes[i].Root, text != null);
             }
-            Root.ScrollToVerticalOffset(offset);
         }
     }
 
@@ -147,8 +200,11 @@ namespace DevTxt.Core
         public readonly Border Root;
         readonly FrameworkElement icon;
         readonly Status status = new Status();
-        readonly Progress bar = new Progress(Tokens.Palette.Brand);
+        readonly Progress bar = new Progress(Ui.Accent);
         Status.Kind last = Status.Kind.None;
+
+        // Подсказка к строке: полный текст ошибки
+        public string Tip { set { if (!Equals(Root.ToolTip, value)) Root.ToolTip = value; } }
 
         public TaskLine(string label, string[] sprite)
         {
@@ -196,6 +252,7 @@ namespace DevTxt.Core
         readonly List<string> tasks = new List<string>();   // что ставится на третьем шаге
         readonly Dictionary<string, TaskLine> lines = new Dictionary<string, TaskLine>();
         bool autostart, gather = true, movedSelf, gathering;
+        string selfError, selfTip;   // core.txt не смог встать в общую папку: это видно в его строке на третьем шаге
         int step, shown = -1;
         string drawn;          // по чему нарисованы строки шага: если не изменилось — не перерисовываем, и переключатели доигрывают своё движение
         bool? working;         // идёт ли установка: смена — повод для движения
@@ -220,6 +277,9 @@ namespace DevTxt.Core
 
         public void SetStep(int n) { step = n; }
 
+        // Сам core.txt не установился (или не переехал): показать это в его строке, а не прятать
+        public void SelfFailed(string error, string tip) { selfError = error; selfTip = tip; }
+
         bool NeedsHome { get { return w.DemoMode || !SelfUpdate.IsInstalled; } }
 
         void Build()
@@ -241,7 +301,7 @@ namespace DevTxt.Core
             for (int i = 0; i < segs.Length; i++)
             {
                 bar.ColumnDefinitions.Add(new ColumnDefinition());
-                segs[i] = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Solid(Tokens.Palette.Brand), Visibility = Visibility.Hidden };
+                segs[i] = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.AccentBrush, Visibility = Visibility.Hidden };
                 var track = new Border { Height = 4, CornerRadius = new CornerRadius(2), Margin = new Thickness(i == 0 ? 0 : 6, 0, 0, 0), Background = Ui.Fill2, Child = segs[i] };
                 Grid.SetColumn(track, i);
                 bar.Children.Add(track);
@@ -327,7 +387,7 @@ namespace DevTxt.Core
             }
             else
             {
-                if (movedSelf || w.DemoMode || tasks.Count == 0 && !gathering) Line("core", "core.txt", CoreSprite);
+                if (movedSelf || selfError != null || w.DemoMode || tasks.Count == 0 && !gathering) Line("core", "core.txt", CoreSprite);
                 foreach (string id in tasks)
                 {
                     Card c = w.Cards.Find(delegate(Card x) { return x.App.Id == id; });
@@ -351,12 +411,17 @@ namespace DevTxt.Core
             bool busy = false;
             failed = false;
             TaskLine l;
-            if (lines.TryGetValue("core", out l)) l.Set(movedSelf || w.DemoMode ? "в папке dev.txt, ярлык в меню «Пуск»" : "готов к работе", Status.Kind.Ok, 2, false);
+            if (lines.TryGetValue("core", out l))
+            {
+                if (selfError != null) { failed = true; l.Set(selfError, Status.Kind.Bad, 2, false); l.Tip = selfTip; }
+                else { l.Set(movedSelf || w.DemoMode ? "в папке dev.txt, ярлык в меню «Пуск»" : "готов к работе", Status.Kind.Ok, 2, false); l.Tip = null; }
+            }
             foreach (string id in tasks)
             {
                 Card c = w.Cards.Find(delegate(Card x) { return x.App.Id == id; });
                 if (c == null || !lines.TryGetValue(id, out l)) continue;
-                if (c.S.Phase == Phase.Downloading) { busy = true; l.Set("скачивается — " + (int)Math.Round(c.S.Progress * 100) + "%", Status.Kind.Warn, c.S.Progress, true); }
+                l.Tip = c.S.Phase == Phase.Idle && c.S.Error != null ? (c.S.ErrorDetail != null ? c.S.Error + "\n" + c.S.ErrorDetail : c.S.Error) : null;
+                if (c.S.Phase == Phase.Downloading) { busy = true; l.Set("скачивается — " + (c.S.Total > 0 ? Releases.Megabytes(c.S.Done, c.S.Total) : (int)Math.Round(c.S.Progress * 100) + "%"), Status.Kind.Warn, c.S.Progress, true); }
                 else if (c.S.Phase != Phase.Idle) { busy = true; l.Set("устанавливается…", Status.Kind.Warn, -1, true); }
                 else if (c.S.Error != null) { failed = true; l.Set(c.S.Error, Status.Kind.Bad, 2, false); }
                 else if (c.S.Installed) l.Set("установлено", Status.Kind.Ok, 2, false);
@@ -378,9 +443,10 @@ namespace DevTxt.Core
         {
             if (mark == null) Build();
             bool stepChanged = shown != step;
-            string sig = step + "|" + State.Accent + "|" + string.Join(",", w.Cards.ConvertAll(delegate(Card c) { return c.S.Installed ? "1" : "0"; }).ToArray());
-            if (step == 2) sig = "2";
+            string sig = step + "|" + string.Join(",", w.Cards.ConvertAll(delegate(Card c) { return c.App.Id + (c.S.Installed ? "1" : "0"); }).ToArray());
+            if (step == 2) sig = "2|" + string.Join(",", tasks.ToArray()) + "|" + movedSelf + gathering + (selfError != null);
             if (sig != drawn) { BuildStep(); drawn = sig; }
+            if (step == 1) PaintSwatches();   // цвет выбрали — кольцо переезжает на месте, строки не пересобираются
 
             for (int i = 0; i < segs.Length; i++)
             {
@@ -413,21 +479,22 @@ namespace DevTxt.Core
                 back.Hide();
                 List<string> every = Everything();
                 if (every.Count > 0 || NeedsHome)
-                    all.Set("Установить всё", Tokens.Palette.Brand, true, delegate { w.FinishWelcome(Everything(), NeedsHome, true, true); });
-                next.Set("Выбрать самому", null, true, delegate { step = 1; w.RenderWelcome(); });
-                Motion.Swap(tip, "«Установить всё» — все приложения и стандартные настройки: общий цвет, одна папка, запуск вместе с Windows.");
+                    all.Set("Установить всё", null, true, delegate { w.FinishWelcome(Everything(), NeedsHome, true, true); });
+                // Главная кнопка ведёт дальше с тем, что отмечено переключателями; «Установить всё» — запасной короткий путь
+                next.Set("Далее", Ui.Accent, true, delegate { step = 1; w.RenderWelcome(); });
+                Motion.Swap(tip, "«Далее» — поставить отмеченное и выбрать вид. «Установить всё» — все приложения сразу: одна папка, запуск вместе с Windows.");
             }
             else if (step == 1)
             {
                 back.Set("Назад", null, true, delegate { step = 0; w.RenderWelcome(); });
-                next.Set(NeedsHome ? "Установить" : "Готово", Tokens.Palette.Brand, true, delegate { w.FinishWelcome(new List<string>(chosen), NeedsHome, autostart, gather); });
+                next.Set(NeedsHome ? "Установить" : "Готово", Ui.Accent, true, delegate { w.FinishWelcome(new List<string>(chosen), NeedsHome, autostart, gather); });
                 Motion.Swap(tip, NeedsHome ? "core.txt встанет в папку программ dev.txt в вашем профиле и появится в меню «Пуск». Права администратора не нужны." : "");
             }
             else
             {
                 back.Hide();
-                next.Set(busy ? "Устанавливается…" : "Открыть core.txt", Tokens.Palette.Brand, !busy, delegate { w.LeaveWelcome(); });
-                Motion.Swap(tip, failed ? "Что не установилось, можно поставить ещё раз с карточки приложения." : busy ? "Окно можно свернуть — установка продолжится." : "Тему для Steam и подключение Discord можно добавить с карточек в core.txt.");
+                next.Set(busy ? "Устанавливается…" : "Открыть core.txt", Ui.Accent, !busy, delegate { w.LeaveWelcome(); });
+                Motion.Swap(tip, selfError != null && !busy ? "core.txt остался там, откуда запущен. Перенести его можно позже: «Общие» → «Собрать»." : failed ? "Что не установилось, можно поставить ещё раз с карточки приложения." : busy ? "Окно можно свернуть — установка продолжится." : "Тему для Steam и подключение Discord можно добавить с карточек в core.txt.");
             }
 
             if (stepChanged)

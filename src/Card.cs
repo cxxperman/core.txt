@@ -19,7 +19,7 @@ namespace DevTxt.Core
     class Card
     {
         public readonly AppEntry App;
-        public readonly AppStatus S = new AppStatus();
+        public readonly AppStatus S;
         public readonly Border Root;
         public readonly Btn Main = new Btn(), Second = new Btn();
         readonly Border tile;
@@ -38,9 +38,13 @@ namespace DevTxt.Core
         bool drawn, wasBusy, wasInstalled;
         string wasError;
 
-        public Card(AppEntry app)
+        public Card(AppEntry app) : this(app, null) { }
+
+        // status — состояние прежней карточки этого же приложения: каталог обновился, а что известно о программе — осталось
+        public Card(AppEntry app, AppStatus known)
         {
             App = app;
+            S = known ?? new AppStatus();
             letter = new TextBlock { Text = app.Name.Substring(0, 1).ToUpperInvariant(), FontSize = 24, FontWeight = FontWeights.Bold, FontFamily = Ui.DisplayFont, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
             icon = new Image { Width = 40, Height = 40, Visibility = Visibility.Collapsed };
             RenderOptions.SetBitmapScalingMode(icon, BitmapScalingMode.HighQuality);
@@ -57,7 +61,8 @@ namespace DevTxt.Core
 
             var name = Ui.Brand(app.Name, Tokens.Size.Title, FontWeights.SemiBold);
             var tagline = Ui.T(app.Tagline, Tokens.Size.Caption, Ui.Label2, FontWeights.Normal);
-            tagline.TextWrapping = TextWrapping.Wrap; tagline.MaxHeight = 32; tagline.Margin = new Thickness(0, 2, 0, 0);
+            tagline.TextWrapping = TextWrapping.Wrap; tagline.TextTrimming = TextTrimming.CharacterEllipsis; tagline.MaxHeight = 32; tagline.Margin = new Thickness(0, 2, 0, 0);
+            if (app.Tagline.Length > 60) tagline.ToolTip = app.Tagline;   // длинная подпись обрезается — целиком она в подсказке
             var head = new StackPanel { Margin = new Thickness(14, 2, 0, 0), Children = { name, tagline } };
             var top = new DockPanel { LastChildFill = true };
             DockPanel.SetDock(tile, Dock.Left);
@@ -67,7 +72,7 @@ namespace DevTxt.Core
             var statusRow = status.Root;
             statusRow.Margin = new Thickness(0, 14, 0, 0);
             note = Ui.T("", Tokens.Size.Micro, Ui.Label3, FontWeights.Normal);
-            note.TextWrapping = TextWrapping.Wrap; note.Margin = new Thickness(14, 3, 0, 0); note.MaxHeight = 28;
+            note.TextWrapping = TextWrapping.Wrap; note.TextTrimming = TextTrimming.CharacterEllipsis; note.Margin = new Thickness(14, 3, 0, 0); note.MaxHeight = 28;
 
             bar = new Progress(app.Color);
             bar.Root.Margin = new Thickness(0, 10, 0, 0);
@@ -82,7 +87,15 @@ namespace DevTxt.Core
             removeLink.Margin = new Thickness(0, 0, 0, 7); removeLink.Cursor = System.Windows.Input.Cursors.Hand; removeLink.Background = Brushes.Transparent;
             removeLink.MouseEnter += delegate { removeLink.Foreground = Ui.Label; };
             removeLink.MouseLeave += delegate { removeLink.Foreground = Ui.Label3; };
-            removeLink.MouseLeftButtonUp += delegate { confirming = true; withData = false; if (Changed != null) Changed(); };
+            Action ask = delegate
+            {
+                confirming = true; withData = false;
+                if (Changed != null) Changed();
+                // Вопрос задан — фокус на «Отмена»: Enter ничего не удалит, Esc закроет вопрос
+                Second.Root.Dispatcher.BeginInvoke(new Action(delegate { if (confirming) Second.Root.Focus(); }), DispatcherPriority.Input);
+            };
+            removeLink.MouseLeftButtonUp += delegate { ask(); };
+            Ui.Keyboard(removeLink, ask);
 
             var dataLabel = Ui.T("Стереть и настройки", Tokens.Size.Caption, Ui.Label2, FontWeights.Normal);
             dataLabel.VerticalAlignment = VerticalAlignment.Center; dataLabel.Margin = new Thickness(10, 0, 0, 0);
@@ -115,6 +128,22 @@ namespace DevTxt.Core
 
         // Показать вопрос об удалении (для снимков)
         public void AskRemove() { confirming = true; }
+
+        // Esc: убрать вопрос об удалении. true — вопрос был
+        public bool CancelRemove()
+        {
+            if (!confirming) return false;
+            confirming = false;
+            if (Changed != null) Changed();
+            return true;
+        }
+
+        // Кнопка «Открыть»: пока приложение запускается, она это и говорит и второй раз не нажимается
+        static void OpenButton(Btn b, Card target, string label, Action<Card> open)
+        {
+            if (target.S.Launching) b.Set("Запускается…", null, false, null);
+            else b.Set(label, null, true, delegate { open(target); });
+        }
 
         static string V(Version v) { return v.Major + "." + v.Minor + "." + v.Build; }
 
@@ -164,13 +193,13 @@ namespace DevTxt.Core
                 hint = S.Installed ? "" : App.Hint;
                 // Подключить можно прямо отсюда, если приложение, которое это делает, сейчас на связи
                 if (!S.Installed && App.Connect != null && via != null && connected(via.App.Id)) Main.Set("Подключить", Ui.Accent, true, delegate { connect(this); });
-                else if (via != null && via.S.Installed) Main.Set("Открыть " + via.App.Name.ToLowerInvariant() + ".txt", null, true, delegate { open(via); });
+                else if (via != null && via.S.Installed) OpenButton(Main, via, "Открыть " + via.App.Name.ToLowerInvariant() + ".txt", open);
                 else if (via != null) Main.Set("Нужна " + via.App.Name.ToLowerInvariant() + ".txt", null, false, null);
                 else Main.Hide();
             }
             else if (S.Phase == Phase.Downloading)
             {
-                text = "Скачивается — " + (int)Math.Round(S.Progress * 100) + "%";
+                text = "Скачивается — " + (S.Total > 0 ? Releases.Megabytes(S.Done, S.Total) : (int)Math.Round(S.Progress * 100) + "%");
                 dotColor = App.Color;
                 Main.Set(S.Installed ? "Обновление…" : "Установка…", null, false, null);
             }
@@ -187,7 +216,7 @@ namespace DevTxt.Core
             }
             else
             {
-                text = (S.Version != null ? "Версия " + V(S.Version) : "Установлено") + (S.Running ? " · запущено" : "");
+                text = (S.Version != null ? "Версия " + V(S.Version) : "Установлено") + (S.Running ? " · запущено" : S.Launching ? " · запускается…" : "");
                 if (!App.HasExe) dotColor = Tokens.Palette.Green;
                 if (S.Running) dotColor = Tokens.Palette.Green;
                 if (S.UpdateAvailable)
@@ -195,16 +224,20 @@ namespace DevTxt.Core
                     hint = "Есть обновление " + V(S.Latest.Version) + (S.Running ? " — приложение перезапустится" : "");
                     dotColor = Tokens.Palette.Orange;
                     Main.Set("Обновить", Ui.Accent, true, delegate { install(this); });
-                    if (App.HasExe) Second.Set("Открыть", null, true, delegate { open(this); });
+                    if (App.HasExe) OpenButton(Second, this, "Открыть", open);
                 }
-                else if (App.HasExe) Main.Set("Открыть", null, true, delegate { open(this); });
+                else if (App.HasExe) OpenButton(Main, this, "Открыть", open);
                 else { Main.Hide(); hint = App.Hint; }   // набор: открывать нечего, зато есть что сказать, как его включить
             }
 
-            if (S.Error != null && !busy) { hint = S.Error; note.Foreground = Ui.Solid(Tokens.Palette.Red); }
+            bool failed = S.Error != null && !busy;
+            if (failed) { hint = S.Error; note.Foreground = Ui.Solid(Tokens.Palette.Red); }
             else note.Foreground = Ui.Label3;
             status.Set(text, dotColor);
             if (hint != "") Motion.Swap(note, hint);
+            // Строка под состоянием короткая и может обрезаться — целиком она в подсказке, у ошибки ещё и с исходным текстом
+            string full = hint == "" ? null : failed && S.ErrorDetail != null ? hint + "\n" + S.ErrorDetail : hint.Length > 60 || failed ? hint : null;
+            if (!Equals(note.ToolTip, full)) note.ToolTip = full;
             Motion.Show(note, hint != "");
 
             // Движением отмечаем то, что случилось с прошлого раза: работа началась, получилось, не получилось

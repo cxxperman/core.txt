@@ -100,8 +100,19 @@ namespace DevTxt.Core
             return best;
         }
 
-        // Скачивает файл релиза во временную папку и возвращает путь к нему. progress — доля от 0 до 1.
-        public static string Download(Release r, Action<double> progress)
+        // Сколько скачано, по-человечески: «34 из 151 МБ»; у маленьких файлов — с десятыми: «0,4 из 2,1 МБ»
+        public static string Megabytes(long done, long total)
+        {
+            const double mb = 1024 * 1024;
+            if (total <= 0) return "";
+            done = Math.Max(0, Math.Min(done, total));
+            if (total >= 10 * mb) return Math.Floor(done / mb) + " из " + Math.Round(total / mb) + " МБ";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            return (Math.Floor(done / mb * 10) / 10).ToString("0.0", inv).Replace('.', ',') + " из " + Math.Max(0.1, total / mb).ToString("0.0", inv).Replace('.', ',') + " МБ";
+        }
+
+        // Скачивает файл релиза во временную папку и возвращает путь к нему. progress — сколько байт скачано и сколько всего.
+        public static string Download(Release r, Action<long, long> progress)
         {
             if (string.IsNullOrEmpty(r.Sha)) throw new Exception("В релизе нет контрольной суммы файла — ставить его небезопасно");
             string dir = Path.Combine(Path.GetTempPath(), "core.txt");
@@ -126,7 +137,7 @@ namespace DevTxt.Core
                         sha.TransformBlock(buf, 0, n, null, 0);
                         total += n;
                         if (total > r.Size) throw new Exception("Файл больше, чем указано в релизе");
-                        if (progress != null && Environment.TickCount - last > 80) { last = Environment.TickCount; progress(r.Size > 0 ? (double)total / r.Size : 0); }
+                        if (progress != null && Environment.TickCount - last > 80) { last = Environment.TickCount; progress(total, r.Size); }
                     }
                     sha.TransformFinalBlock(buf, 0, 0);
                     hash = BitConverter.ToString(sha.Hash).Replace("-", "").ToLowerInvariant();

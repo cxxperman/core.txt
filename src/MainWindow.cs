@@ -41,7 +41,10 @@ namespace DevTxt.Core
         string navSig;
         int page;
         bool checking, quitting, updatingSelf;
-        string notice;   // последняя ошибка — показывается в строке состояния
+        string notice;      // последняя ошибка — показывается в строке состояния
+        string noticeTip;   // её исходный текст — в подсказке
+        readonly HashSet<string> userCommands = new HashSet<string>();   // команды хабу, которые отправил человек, а не сценарий
+        readonly DispatcherTimer launchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };   // ждём, пока открытое приложение появится
 
         Hub hub;
         HubServer server;
@@ -63,6 +66,8 @@ namespace DevTxt.Core
             Ui.ThemeFollows = !demo;
             Ui.Native(this, true);
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            if (!demo) PlaceWindow();
+            ApplyAccent();
             Background = Ui.Bg;
             FontFamily = Ui.TextFont;
             UseLayoutRounding = true;
@@ -73,11 +78,18 @@ namespace DevTxt.Core
             welcome = new WelcomePage(this);
             scenarios = new Scenarios(
                 delegate(string topic) { object data; return States.TryGetValue(topic, out data) ? data : null; },
-                delegate(string app, string key, object value) { SendCommand(app, "settings.set", Hub.Msg("key", key, "value", value)); },
+                delegate(string app, string key, object value) { SendCommand(app, "settings.set", Hub.Msg("key", key, "value", value), false); },
                 delegate(string id) { return State.Scenarios.Contains(id); });
             Content = Build();
             BuildCards();
+            if (!demo && page == PApps) RestoreSection();
             ShowPage(page);
+            // Esc убирает вопрос об удалении с карточки
+            PreviewKeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.Key != Key.Escape || page != PApps) return;
+                foreach (var c in Cards) if (c.CancelRemove()) e.Handled = true;
+            };
 
             if (demo) return;
 
@@ -85,9 +97,24 @@ namespace DevTxt.Core
             StartTray();
             timer.Tick += delegate { RefreshLocal(); TaskbarGuard.Check(); };   // док пропал, а панель задач спрятана — возвращаем
             timer.Start();
+            launchTimer.Tick += delegate { WatchLaunches(); };
             Closing += delegate(object s, System.ComponentModel.CancelEventArgs e)
             {
-                if (!quitting && State.Tray && State.Onboarded) { e.Cancel = true; Hide(); return; }   // окно закрыли — core.txt остаётся в трее и держит хаб
+                KeepBounds();
+                if (!quitting && State.Tray && State.Onboarded)
+                {
+                    // Окно закрыли — core.txt остаётся в трее и держит хаб. В первый раз говорим об этом
+                    e.Cancel = true;
+                    Hide();
+                    if (!State.TrayHint && tray != null)
+                    {
+                        State.TrayHint = true;
+                        Notify("core.txt остался в трее", "Приложения dev.txt по-прежнему на связи. Выход — в меню значка");
+                    }
+                    State.Save();
+                    return;
+                }
+                State.Save();
                 if (tray != null) { tray.Visible = false; tray.Dispose(); }
                 if (server != null) server.Stop();
             };
@@ -126,7 +153,9 @@ namespace DevTxt.Core
             shell.Bottom.Children.Add(footer);
             bottom = shell.Bottom;
 
-            appsView = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Padding = new Thickness(25, 0, 25, 0), Content = grid, Focusable = false };
+            appsView = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(25, 0, 25, 0), Content = grid, Focusable = false };
+            // Сколько карточек в ряд — по ширине окна
+            appsView.SizeChanged += delegate { int n = Columns(appsView.ActualWidth); if (grid.Columns != n) grid.Columns = n; };
             shell.Body.Children.Add(appsView);
             shell.Body.Children.Add(scenariosPage.Root);
             shell.Body.Children.Add(settings.Root);
@@ -142,6 +171,63 @@ namespace DevTxt.Core
             b.MouseLeave += delegate { b.Background = Brushes.Transparent; t.Foreground = Ui.Label2; };
             b.MouseLeftButtonUp += delegate { click(); };
             return b;
+        }
+
+        // Карточек в ряд: в узком окне — одна, в обычном — две, в широком — три. width — ширина области карточек.
+        // Карточка не бывает у́же примерно 360 точек: иначе подпись и кнопки в неё не помещаются.
+        internal static int Columns(double width) { return width < 720 ? 1 : width < 1240 ? 2 : 3; }
+
+        // Общий цвет экосистемы красит и сам core.txt; «свой у каждого» — оранжевый dev.txt
+        void ApplyAccent() { Ui.SetAccent(AccentOf(State.Accent)); }
+
+        internal static Color AccentOf(string hex)
+        {
+            try { if (!string.IsNullOrEmpty(hex)) return (Color)ColorConverter.ConvertFromString(hex); } catch { }
+            return Tokens.Palette.Brand;
+        }
+
+        // ───────── Где было окно и что в нём было открыто ─────────
+        void PlaceWindow()
+        {
+            if (State.WinW <= 0 || State.WinH <= 0 || double.IsNaN(State.WinX) || double.IsNaN(State.WinY)) return;
+            try
+            {
+                // Рабочая область экрана, на котором окно было: в точках WPF, а не в пикселях
+                double k = 1;
+                using (var g = System.Drawing.Graphics.FromHwnd(IntPtr.Zero)) k = Math.Max(0.5, g.DpiX / 96.0);
+                var px = new System.Drawing.Rectangle((int)(State.WinX * k), (int)(State.WinY * k), (int)(State.WinW * k), (int)(State.WinH * k));
+                var area = System.Windows.Forms.Screen.FromRectangle(px).WorkingArea;
+                double x = State.WinX, y = State.WinY, w = State.WinW, h = State.WinH;
+                State.Fit(ref x, ref y, ref w, ref h, area.X / k, area.Y / k, area.Width / k, area.Height / k, MinWidth, MinHeight);
+                WindowStartupLocation = WindowStartupLocation.Manual;
+                Left = x; Top = y; Width = w; Height = h;
+                if (State.WinMax) WindowState = WindowState.Maximized;
+            }
+            catch { }
+        }
+
+        void KeepBounds()
+        {
+            if (DemoMode) return;
+            Rect r = WindowState == WindowState.Normal ? new Rect(Left, Top, ActualWidth, ActualHeight) : RestoreBounds;
+            if (r.IsEmpty || double.IsNaN(r.X) || double.IsNaN(r.Y) || r.Width < 100 || r.Height < 100) return;   // окно ни разу не показывали
+            State.WinX = r.X; State.WinY = r.Y; State.WinW = r.Width; State.WinH = r.Height;
+            State.WinMax = WindowState == WindowState.Maximized;
+        }
+
+        // Раздел, открытый в прошлый раз. Раздела приложения может уже не быть — тогда остаёмся на «Приложениях».
+        void RestoreSection()
+        {
+            string key = State.Section;
+            if (!State.Onboarded || key == null || key == "apps") return;
+            if (key == "scenarios") { page = PScenarios; return; }
+            if (key.StartsWith("app:"))
+            {
+                Card c = Find(key.Substring(4));
+                if (c == null || !HasSettings(c)) return;
+            }
+            settings.Section = key;
+            page = PSettings;
         }
 
         void ShowPage(int i)
@@ -162,6 +248,7 @@ namespace DevTxt.Core
             if (key == "apps") ShowPage(PApps);
             else if (key == "scenarios") ShowPage(PScenarios);
             else { settings.Section = key; ShowPage(PSettings); }
+            if (!DemoMode && State.Section != key) { State.Section = key; State.Save(); }
             FrameworkElement now = page == PApps ? appsView : page == PScenarios ? scenariosPage.Root : (FrameworkElement)settings.Root;
             Motion.Enter(now);
             Animate();
@@ -238,7 +325,50 @@ namespace DevTxt.Core
             if (DemoMode) Demo(); else foreach (var c in Cards) { AppOps.Refresh(c.App, c.S); InstalledApps.Sync(c.App, c.S); }
         }
 
+        // В каком порядке встанут карточки после обновления каталога: как в каталоге; приложение, которого там больше нет,
+        // остаётся в конце, пока с ним идёт работа (установка, удаление) — иначе она потерялась бы.
+        internal static List<string> MergeOrder(IList<string> catalog, IList<string> shown, Predicate<string> busy)
+        {
+            var order = new List<string>(catalog);
+            foreach (string id in shown) if (!order.Contains(id) && busy(id)) order.Add(id);
+            return order;
+        }
+
+        // Каталог обновился. Карточки не строятся заново: занятая остаётся той же самой (её ждёт идущая установка),
+        // у свободной меняется только описание из каталога, а всё, что известно о программе, сохраняется.
+        void MergeCards()
+        {
+            var old = new List<Card>(Cards);
+            Func<string, Card> was = delegate(string id) { return old.Find(delegate(Card c) { return c.App.Id == id; }); };
+            var order = MergeOrder(Catalog.Apps.ConvertAll(delegate(AppEntry a) { return a.Id; }), old.ConvertAll(delegate(Card c) { return c.App.Id; }),
+                delegate(string id) { Card c = was(id); return c != null && c.S.Phase != Phase.Idle; });
+            Cards.Clear();
+            grid.Children.Clear();
+            foreach (string id in order)
+            {
+                Card before = was(id), c = before;
+                AppEntry app = Catalog.Apps.Find(delegate(AppEntry a) { return a.Id == id; });
+                if (app != null && (before == null || before.S.Phase == Phase.Idle))
+                {
+                    c = new Card(app, before != null ? before.S : null);
+                    c.Remove = RemoveApp;
+                    c.Changed = RenderAll;
+                    AppOps.Refresh(c.App, c.S);
+                    InstalledApps.Sync(c.App, c.S);
+                }
+                Cards.Add(c);
+                grid.Children.Add(c.Root);
+            }
+            navSig = null;   // названия и значки разделов могли измениться
+        }
+
         Card Find(string id) { return Cards.Find(delegate(Card c) { return c.App.Id == id; }); }
+
+        bool AnyBusy { get { return GatherBusy || Cards.Exists(delegate(Card c) { return c.S.Phase != Phase.Idle; }); } }
+
+        // Ошибка в строке состояния: короткая фраза, а исходный текст — в подсказке
+        void Say(string text, string tip) { notice = text; noticeTip = text == null ? null : tip; }
+        void Say(string prefix, Exception e) { Say(prefix == null ? Errors.Short(e) : prefix + ": " + Errors.Lower(Errors.Short(e)), Errors.Detail(e)); }
 
         void RenderAll()
         {
@@ -259,9 +389,12 @@ namespace DevTxt.Core
             else line = (updates > 0 ? "Обновлений: " + updates + " · " : "") + when;
             Motion.Swap(footer, line + " · версия " + Program.VersionText + " · dev.txt™");
             int missing = Cards.FindAll(Installable).Count;
-            if (page == PApps && missing > 1) allBtn.Set("Установить всё", Tokens.Palette.Brand, true, InstallAll); else allBtn.Hide();
+            if (page == PApps && missing > 1) allBtn.Set("Установить всё", Ui.Accent, true, InstallAll); else allBtn.Hide();
             footer.Foreground = notice != null ? Ui.Solid(Tokens.Palette.Red) : Ui.Label3;
-            if (SelfUpdate.Available) checkBtn.Set("Обновить core.txt до " + SelfUpdate.Latest.Version, Tokens.Palette.Brand, !updatingSelf, UpdateSelf);
+            string tip = notice != null ? noticeTip : null;
+            if (!Equals(footer.ToolTip, tip)) footer.ToolTip = tip;
+            // Обновление закрывает core.txt — пока что-то ставится или переносится, кнопка ждёт
+            if (SelfUpdate.Available) checkBtn.Set("Обновить core.txt до " + SelfUpdate.Latest.Version, Ui.Accent, !updatingSelf && !AnyBusy, UpdateSelf);
             else checkBtn.Set("Проверить обновления", null, !checking, CheckAll);
         }
 
@@ -302,10 +435,17 @@ namespace DevTxt.Core
             }
             else if (type == "result")
             {
-                object ok;
+                object ok, rid;
+                m.TryGetValue("id", out rid);
+                // Ответ на команду сценария строку состояния не трогает: человек ничего не нажимал и не поймёт, о чём она
+                if (!userCommands.Remove(Convert.ToString(rid))) return;
                 bool good = m.TryGetValue("ok", out ok) && ok is bool && (bool)ok;
                 string error = Json.Str(m, "error");
-                notice = good ? null : "Не получилось: " + (error == "offline" ? "приложение не запущено" : error == "timeout" ? "приложение не ответило" : error ?? "приложение отказало");
+                if (good) Say(null, (string)null);
+                else if (error == "offline") Say("Не получилось: приложение не запущено", (string)null);
+                else if (error == "timeout") Say("Не получилось: приложение не ответило", (string)null);
+                else if (error == "unknown-command") Say("Не получилось: приложение не знает такой команды — обновите его", (string)null);
+                else Say("Не получилось: приложение отказало", error);
                 if (good) RefreshLocal();   // подключение могло только что появиться на диске
                 RenderAll();
             }
@@ -321,11 +461,16 @@ namespace DevTxt.Core
             }
         }
 
-        internal void SendCommand(string app, string name, Dictionary<string, object> args)
+        // Команда приложению от человека: чем она кончилась, скажет строка состояния
+        internal void SendCommand(string app, string name, Dictionary<string, object> args) { SendCommand(app, name, args, true); }
+
+        // byUser == false — команду отправил сценарий: её ответ строку состояния не меняет
+        void SendCommand(string app, string name, Dictionary<string, object> args, bool byUser)
         {
             if (hub == null) return;
-            notice = null;
-            hub.Receive(local, Hub.Msg("type", "command", "id", "core-" + (++commandSeq), "to", app, "name", name, "args", args));
+            string id = "core-" + (++commandSeq);
+            if (byUser) { Say(null, (string)null); userCommands.Add(id); }
+            hub.Receive(local, Hub.Msg("type", "command", "id", id, "to", app, "name", name, "args", args));
         }
 
         internal bool Connected(string app) { return connectedApps.Contains(app); }
@@ -335,7 +480,6 @@ namespace DevTxt.Core
         {
             if (DemoMode || c.App.Connect == null || c.App.Via == null) return;
             SendCommand(c.App.Via, c.App.Connect, new Dictionary<string, object>());
-            notice = null;
             RenderAll();
         }
 
@@ -345,6 +489,7 @@ namespace DevTxt.Core
             if (accent != null) State.Accent = accent == "" ? null : accent;
             if (reduced.HasValue) State.ReducedMotion = reduced.Value;
             Ui.ForceReducedMotion = State.ReducedMotion;
+            ApplyAccent();
             if (!DemoMode) State.Save();
             if (hub != null) hub.SetTheme(accent, reduced);
             RenderAll();
@@ -356,6 +501,7 @@ namespace DevTxt.Core
             State.Accent = hub.Accent;
             State.ReducedMotion = hub.ReducedMotion;
             Ui.ForceReducedMotion = State.ReducedMotion;
+            ApplyAccent();
             State.Save();
             RenderAll();
         }
@@ -384,7 +530,13 @@ namespace DevTxt.Core
             {
                 // Дальше работает уже установленная копия: она и поставит выбранные приложения
                 try { SelfUpdate.InstallSelf(); Quit(); return; }
-                catch (Exception e) { notice = "Не удалось установить core.txt: " + e.Message; }
+                catch (Exception e)
+                {
+                    // Не встал в общую папку — работаем отсюда и честно показываем это в строке core.txt
+                    welcome.SelfFailed("не установлен: " + Errors.Lower(Errors.Short(e)), e.Message);
+                    State.GatherPending = false;
+                    State.Save();
+                }
             }
             welcome.ShowProgress(install, false, gather);
             RenderAll();
@@ -407,26 +559,41 @@ namespace DevTxt.Core
         // Переносит приложения dev.txt в общий дом, а последним — сам core.txt
         internal async void GatherAll()
         {
-            if (DemoMode) return;
-            notice = null;
+            if (DemoMode || GatherBusy) return;   // перенос уже идёт — второй поверх него не начинаем
+            Say(null, (string)null);
             GatherBusy = true;
-            foreach (var c in Cards.ToArray())
+            bool failed = false;
+            var tried = new HashSet<string>();
+            RenderAll();
+            while (true)
             {
-                if (!AppOps.Outside(c.App, c.S) || c.S.Phase != Phase.Idle) continue;
-                var card = c;
+                Card card = Cards.Find(delegate(Card c) { return c.S.Phase == Phase.Idle && !tried.Contains(c.App.Id) && AppOps.Outside(c.App, c.S); });
+                if (card == null)
+                {
+                    // Что-то ещё ставится или обновляется: ждём — сам core.txt переезжает (и закрывается) последним
+                    if (!Cards.Exists(delegate(Card c) { return c.S.Phase != Phase.Idle; }) && !updatingSelf) break;
+                    await Task.Delay(300);
+                    continue;
+                }
+                tried.Add(card.App.Id);
                 card.S.Phase = Phase.Installing;
                 RenderAll();
                 try { await Task.Run(delegate { AppOps.Gather(card.App, card.S); }); }
-                catch (Exception e) { notice = e.Message; }
+                catch (Exception e) { failed = true; Say(null, e); }
                 card.S.Phase = Phase.Idle;
                 AppOps.Refresh(card.App, card.S);
             }
             GatherBusy = false;
             RenderAll();
-            if (notice == null && !SelfUpdate.IsInstalled)
+            if (!failed && !SelfUpdate.IsInstalled)
             {
                 try { SelfUpdate.InstallSelf(); Quit(); }
-                catch (Exception e) { notice = "Не удалось перенести core.txt: " + e.Message; RenderAll(); }
+                catch (Exception e)
+                {
+                    Say("Не удалось перенести core.txt", e);
+                    welcome.SelfFailed("не перенесён: " + Errors.Lower(Errors.Short(e)), e.Message);
+                    RenderAll();
+                }
             }
         }
 
@@ -490,6 +657,8 @@ namespace DevTxt.Core
         void Quit()
         {
             quitting = true;
+            KeepBounds();
+            if (!DemoMode) State.Save();
             Close();
             Application.Current.Shutdown();
         }
@@ -506,37 +675,48 @@ namespace DevTxt.Core
         {
             if (checking || DemoMode) return;
             checking = true;
-            notice = null;
+            Say(null, (string)null);
             RenderAll();
             bool any = false;
-            if (await Task.Run(delegate { return Catalog.Refresh(); })) BuildCards();   // в каталоге появилось новое приложение
+            int asked = 0, lost = 0;   // сколько раз спросили GitHub и сколько раз он не ответил
+            if (await Task.Run(delegate { return Catalog.Refresh(); })) MergeCards();   // каталог изменился: идущие установки при этом не теряются
             foreach (var c in Cards.ToArray())
             {
                 if (c.App.IsIntegration) continue;
                 var app = c.App;
+                asked++;
                 try
                 {
                     Release r = await Task.Run(delegate { return Releases.Latest(app); });
                     if (r == null && app.Soon) continue;   // релизов ещё нет — так и должно быть
                     if (r != null) { State.Latest[app.Id] = r; c.S.Latest = r; any = true; }
-                    if (c.S.Phase == Phase.Idle) c.S.Error = null;
+                    if (c.S.Phase == Phase.Idle) c.S.Clear();
                 }
-                catch { if (c.S.Phase == Phase.Idle && c.S.Latest == null && !app.Soon) c.S.Error = "Не удалось узнать последнюю версию: нет связи с GitHub"; }
+                catch
+                {
+                    lost++;
+                    if (c.S.Phase == Phase.Idle && c.S.Latest == null && !app.Soon) { c.S.Error = "Не удалось узнать последнюю версию: нет связи с GitHub"; c.S.ErrorDetail = null; }
+                }
             }
             // И сам core.txt: его релизов может ещё не быть — тогда просто ничего не предлагаем
-            try { SelfUpdate.Latest = await Task.Run(delegate { return Releases.Latest(SelfUpdate.Entry); }); } catch { }
+            asked++;
+            try { SelfUpdate.Latest = await Task.Run(delegate { return Releases.Latest(SelfUpdate.Entry); }); } catch { lost++; }
             if (any) { State.Checked = DateTime.UtcNow; State.Save(); }
+            if (AllLost(asked, lost)) Say(Errors.Offline, (string)null);   // не ответил никто — дело в связи, а не в приложениях
             checking = false;
             RenderAll();
             int updates = Cards.FindAll(delegate(Card c) { return c.S.UpdateAvailable; }).Count + (SelfUpdate.Available ? 1 : 0);
             if (updates > 0) Notify("Есть обновления: " + updates, "Откройте core.txt, чтобы обновить");
         }
 
+        // Проверка обновлений: ни один запрос не прошёл
+        internal static bool AllLost(int asked, int lost) { return asked > 0 && lost >= asked; }
+
         async void UpdateSelf()
         {
-            if (updatingSelf || DemoMode || !SelfUpdate.Available) return;
+            if (updatingSelf || DemoMode || !SelfUpdate.Available || AnyBusy) return;
             updatingSelf = true;
-            notice = null;
+            Say(null, (string)null);
             RenderAll();
             try
             {
@@ -546,7 +726,7 @@ namespace DevTxt.Core
                 Quit();   // новая версия уже запущена и ждёт, пока эта закроется
                 return;
             }
-            catch (Exception e) { notice = "Не удалось обновить core.txt: " + e.Message; }
+            catch (Exception e) { Say("Не удалось обновить core.txt", e); }
             updatingSelf = false;
             RenderAll();
         }
@@ -555,8 +735,8 @@ namespace DevTxt.Core
         {
             if (c.S.Phase != Phase.Idle || DemoMode) return;
             var app = c.App;
-            c.S.Error = null;
-            c.S.Progress = 0;
+            c.S.Clear();
+            c.S.Progress = 0; c.S.Done = 0; c.S.Total = 0;
             c.S.Phase = Phase.Downloading;
             RenderAll();
             try
@@ -568,14 +748,13 @@ namespace DevTxt.Core
                     c.S.Latest = found; State.Latest[app.Id] = found; State.Save();
                 }
                 Release r = c.S.Latest;
-                Action<double> progress = delegate(double p) { Dispatcher.BeginInvoke(new Action(delegate { c.S.Progress = p; if (c.S.Phase == Phase.Downloading) { c.Render(Install, Open, Find, Connect, Connected); RenderWelcome(); } })); };
+                Action<long, long> progress = delegate(long done, long total) { Dispatcher.BeginInvoke(new Action(delegate { c.S.Done = done; c.S.Total = total; c.S.Progress = total > 0 ? (double)done / total : 0; if (c.S.Phase == Phase.Downloading) { c.Render(Install, Open, Find, Connect, Connected); RenderWelcome(); } })); };
                 string file = await Task.Run(delegate { return Releases.Download(r, progress); });
                 c.S.Phase = Phase.Installing;
                 RenderAll();
                 await Task.Run(delegate { AppOps.Install(app, c.S, file); });
             }
-            catch (System.Net.WebException) { c.S.Error = "Нет связи с GitHub"; }
-            catch (Exception e) { c.S.Error = e.Message; }
+            catch (Exception e) { c.S.Fail(e); }
             c.S.Phase = Phase.Idle;
             AppOps.Refresh(app, c.S);
             InstalledApps.Sync(app, c.S);
@@ -610,11 +789,11 @@ namespace DevTxt.Core
         {
             if (c.S.Phase != Phase.Idle || DemoMode) return;
             var app = c.App;
-            c.S.Error = null;
+            c.S.Clear();
             c.S.Phase = Phase.Removing;
             RenderAll();
             try { await Task.Run(delegate { AppOps.Uninstall(app, c.S, withData); }); }
-            catch (Exception e) { c.S.Error = e.Message; }
+            catch (Exception e) { c.S.Fail(e); }
             c.S.Phase = Phase.Idle;
             AppOps.Refresh(app, c.S);
             InstalledApps.Sync(app, c.S);
@@ -624,8 +803,29 @@ namespace DevTxt.Core
         internal void Open(Card c)
         {
             if (DemoMode || c.S.Path == null) return;
-            try { AppOps.Launch(c.S.Path); c.S.Error = null; }
-            catch (Exception e) { c.S.Error = "Не удалось запустить: " + e.Message; }
+            if (c.S.Launching) return;
+            try
+            {
+                AppOps.Launch(c.S.Path);
+                c.S.Clear();
+                // Окно приложения появится не сразу: до тех пор кнопка говорит «Запускается…» (не дольше шести секунд)
+                if (!c.S.Running && !string.IsNullOrEmpty(c.App.Process)) { c.S.LaunchUntil = DateTime.UtcNow.AddSeconds(6); launchTimer.Start(); }
+            }
+            catch (Exception e) { c.S.LaunchUntil = DateTime.MinValue; c.S.Fail("Не удалось запустить", e); }
+            RenderAll();
+        }
+
+        // Пока какое-то приложение запускается, смотрим на список процессов чаще обычного
+        void WatchLaunches()
+        {
+            bool waiting = false;
+            foreach (var c in Cards)
+            {
+                if (c.S.LaunchUntil == DateTime.MinValue) continue;
+                if (c.S.Phase == Phase.Idle) AppOps.Refresh(c.App, c.S);
+                if (c.S.Launching) waiting = true; else c.S.LaunchUntil = DateTime.MinValue;
+            }
+            if (!waiting) launchTimer.Stop();
             RenderAll();
         }
 
@@ -652,7 +852,7 @@ namespace DevTxt.Core
                 foreach (var c in Cards)
                 {
                     if (c.App.Id == "kapsula") { c.S.Path = "demo"; c.S.Version = new Version(0, 8, 0); }
-                    if (c.App.Id == "aura") { c.S.Path = null; c.S.Phase = Phase.Downloading; c.S.Progress = 0.62; }
+                    if (c.App.Id == "aura") { c.S.Path = null; c.S.Phase = Phase.Downloading; c.S.Progress = 0.62; c.S.Total = 151L * 1024 * 1024; c.S.Done = (long)(c.S.Total * 0.62); }
                     if (c.App.Id == "dock") { c.S.Path = null; }
                 }
             }

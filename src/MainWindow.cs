@@ -466,7 +466,14 @@ namespace DevTxt.Core
                 tray.MouseUp += delegate(object s, System.Windows.Forms.MouseEventArgs e)
                 {
                     if (e.Button != System.Windows.Forms.MouseButtons.Right) return;
-                    NativeMenu.Show(new NativeMenu.Item("Открыть core.txt", ShowWindow), new NativeMenu.Item("Проверить обновления", delegate { ShowWindow(); CheckAll(); }), NativeMenu.Item.Separator, new NativeMenu.Item("Выход", Quit));
+                    var menu = new PopMenu();
+                    menu.Brand(CoreSprite, "core");
+                    menu.Item("Открыть core.txt", false, ShowWindow);
+                    menu.Item("Проверить обновления", false, delegate { ShowWindow(); CheckAll(); });
+                    menu.Item("Запускать вместе с Windows", Autostart.Enabled, delegate { Autostart.Set(!Autostart.Enabled); RenderAll(); });
+                    menu.Line();
+                    menu.Item("Выход", false, Quit);
+                    menu.ShowAtCursor();
                 };
             }
             catch { tray = null; }

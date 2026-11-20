@@ -3,9 +3,12 @@
 //   --demo              выдуманные состояния приложений; сеть и диск не трогаются
 //   --shot файл.png     нарисовать окно в файл и выйти (обычно вместе с --demo)
 //   --motion папка      вместе с --demo: показать окно, проиграть все действия и сложить кадры движения в папку
-//   --page имя          открыть сразу страницу: scenarios, settings или welcome; --scroll N — прокрутить её (для снимков)
+//   --page имя          открыть сразу страницу: scenarios, settings, welcome или раздел настроек — general, games, keys,
+//                       replace, app:<приложение>; --scroll N — прокрутить её (для снимков)
+//   --menu              вместе с --demo --shot: нарисовать меню значка в трее вместо окна
 //   --tray              запуститься без окна, только значок в трее и хаб
-//   --selftest          проверить разбор каталога, ответа GitHub и замену файла; код выхода 0 — всё в порядке
+//   --selftest          проверить разбор каталога, ответа GitHub и замену файла; код выхода 0 — всё в порядке.
+//                       Настоящие настройки core.txt (%APPDATA%\dev.txt\core) не трогает: работает во временной папке
 //   --hub порт          запустить только хаб на этом порту, без окна (для проверок из kit.txt)
 //   --uninstall имя     удалить приложение без окна; настройки остаются
 //   --install имя       поставить или обновить приложение из каталога без окна и напечатать, чем кончилось
@@ -14,7 +17,9 @@
 using System;
 using System.Net;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Threading;
 
 namespace DevTxt.Core
 {
@@ -47,10 +52,18 @@ namespace DevTxt.Core
             if (args.Length == 4 && args[0] == "--fetch") return SelfTest.Fetch(args[1], args[2], args[3]);
 
             int page = 0;
+            string section = null;   // раздел настроек
             double scroll = 0;
             for (int i = 0; i + 1 < args.Length; i++)
             {
-                if (args[i] == "--page") page = args[i + 1] == "scenarios" ? 1 : args[i + 1] == "settings" ? 2 : args[i + 1] == "welcome" ? 3 : 0;
+                if (args[i] == "--page")
+                {
+                    string p = args[i + 1];
+                    if (p == "scenarios") page = 1;
+                    else if (p == "settings") page = 2;
+                    else if (p == "welcome") page = 3;
+                    else if (p == "general" || p == "games" || p == "keys" || p == "replace" || CoreFamily.ShowPage(Hub.Msg("page", p)) == p && p.StartsWith("app:")) { page = 2; section = p; }
+                }
                 if (args[i] == "--scroll") double.TryParse(args[i + 1], out scroll);
             }
 
@@ -67,17 +80,25 @@ namespace DevTxt.Core
             }
             if (!created)
             {
-                // Уже запущен (возможно, сидит в трее): просим показать окно и выходим
+                // Уже запущен (возможно, сидит в трее): просим показать окно и выходим. Нас запустил человек — значит,
+                // нам Windows разрешает вывести окно вперёд; делимся этим с той копией, иначе окно останется позади
+                MainWindow.LetForeground();
                 try { EventWaitHandle.OpenExisting("devtxt_core_show").Set(); } catch { }
                 return 0;
             }
 
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             Ui.Styles(app.Resources);   // тёмные подсказки и тонкие полосы прокрутки, как во всех приложениях dev.txt
+            UiContext();
             if (!demo) { State.Load(); SelfUpdate.Cleanup(); }
+            else State.Frozen = true;   // демо и снимки ничего не записывают в настройки
             Catalog.Load();
-            var w = new MainWindow(demo, page, Array.IndexOf(args, "--after-install") >= 0);
-            if (shot != null) { w.Shot(shot, scroll); return 0; }
+            var w = new MainWindow(demo, page, section, Array.IndexOf(args, "--after-install") >= 0);
+            if (shot != null)
+            {
+                if (Array.IndexOf(args, "--menu") >= 0) w.MenuShot(shot); else w.Shot(shot, scroll);
+                return 0;
+            }
             if (motion != null)
             {
                 int code = 0;
@@ -95,6 +116,16 @@ namespace DevTxt.Core
             GC.KeepAlive(mutex);
             return 0;
         }
+
+        // Контекст WPF для потока окна — ещё до app.Run(), который ставит его только на время своей работы. Окно
+        // строится раньше, и async-методы, начатые в его конструкторе (проверка обновлений при запуске, установка
+        // выбранного на первом запуске), без этого продолжались бы в пуле потоков и роняли core.txt на первом же
+        // обращении к окну (InvalidOperationException из Dispatcher.VerifyAccess в CheckAll).
+        internal static void UiContext()
+        {
+            if (!(SynchronizationContext.Current is DispatcherSynchronizationContext))
+                SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
+        }
     }
 
     static class SelfTest
@@ -102,8 +133,39 @@ namespace DevTxt.Core
         static int failed;
         static void Check(bool ok, string what) { if (!ok) { failed++; Console.Error.WriteLine("FAIL  " + what); } }
 
+        // Проверки пишут State (пути, найденные версии): State.Save() в установке, переносе и удалении. Всё это — только
+        // во временную папку. Раньше проверка писала в настоящий state.json, и работающий core.txt после перезапуска
+        // открылся бы как в первый раз.
         public static int Run()
         {
+            string real = State.FilePath, before = ReadText(real);
+            string temp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-state-" + System.Diagnostics.Process.GetCurrentProcess().Id);
+            State.DirOverride = temp;
+            try { Checks(); }
+            finally { State.DirOverride = null; }
+            // Настоящий файл мог поменять только работающий core.txt — но не эта проверка (её следы — пути «selftest-…»)
+            string after = ReadText(real);
+            Check(after == before || after == null || after.IndexOf("selftest-", StringComparison.Ordinal) < 0, "the self-test leaves the real state.json of core.txt alone");
+            try { System.IO.Directory.Delete(temp, true); } catch { }
+            Console.WriteLine(failed == 0 ? "all passed" : failed + " failed");
+            return failed == 0 ? 0 : 1;
+        }
+
+        static string ReadText(string path)
+        {
+            try { return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null; } catch { return null; }
+        }
+
+        // Продолжение после await — в каком потоке оно случилось
+        static async void AfterAwait(Action<int> done)
+        {
+            await Task.Delay(20);   // как Task.Run в CheckAll: к await задача ещё не готова
+            done(Thread.CurrentThread.ManagedThreadId);
+        }
+
+        static void Checks()
+        {
+            Check(State.FilePath.StartsWith(System.IO.Path.GetTempPath(), StringComparison.OrdinalIgnoreCase), "the self-test keeps its state in a temporary folder");
             var apps = Catalog.Read(@"{ ""apps"": [
                 { ""id"": ""one"", ""name"": ""One"", ""kind"": ""portable"", ""repo"": ""cxxperman/one"", ""asset"": ""One.exe"", ""exe"": ""One.exe"", ""process"": ""One"", ""color"": ""#F08A4B"" },
                 { ""id"": ""two"", ""name"": ""Two"", ""kind"": ""installer"", ""repo"": ""cxxperman/two"", ""asset"": ""Two-Setup-*.exe"", ""installed"": ""%TEMP%\\two.exe"" },
@@ -360,6 +422,115 @@ namespace DevTxt.Core
                 Check(SettingsPage.ItemSig(item) != sig, "a new label does rebuild it");
             }
 
+            // Семья: core.family и «Не беспокоить»
+            {
+                long now = 1800000000000L;
+                Check(CoreFamily.FocusExpired(true, now - 1, now) && CoreFamily.FocusExpired(true, now, now), "«do not disturb» whose end has come turns off");
+                Check(!CoreFamily.FocusExpired(true, 0, now) && !CoreFamily.FocusExpired(true, now + 60000, now) && !CoreFamily.FocusExpired(false, now - 1, now), "until switched off, or still ahead, or off — nothing to do");
+                Check(CoreFamily.FocusUntil(60, now) == now + 3600000 && CoreFamily.FocusUntil(0, now) == 0 && CoreFamily.FocusUntil(-5, now) == 0 && CoreFamily.FocusUntil(double.NaN, now) == 0, "minutes become an end time; none — until switched off");
+                Check(CoreFamily.FocusUntil(1e12, now) == now + CoreFamily.MaxFocusMinutes * 60000, "a huge time is capped at a week");
+                Check(CoreFamily.Minutes(30) == 30 && CoreFamily.Minutes("15") == 15 && CoreFamily.Minutes(null) == 0 && CoreFamily.Minutes(true) == 0 && CoreFamily.Minutes("x") == 0, "minutes are read from the command");
+
+                var fam = CoreFamily.Make(true, true, true, now + 60000, true, "cs2");
+                var data = fam.ToData();
+                var fields = new System.Collections.Generic.List<string>(data.Keys);
+                fields.Sort(StringComparer.Ordinal);
+                Check(string.Join(",", fields.ToArray()) == "focus,focusUntil,game,gameApp,tray", "core.family has exactly the protocol fields, got " + string.Join(",", fields.ToArray()));
+                var trip = FamilyState.From(Json.Parse(Json.Write(data)));
+                Check(trip != null && trip.Tray && trip.Focus && trip.FocusUntil == now + 60000 && trip.Game && trip.GameApp == "cs2", "core.family survives the trip through the hub");
+                Check(Json.Write(CoreFamily.Make(true, true, false, 0, false, null).ToData()) == "{\"tray\":true,\"focus\":false,\"focusUntil\":0,\"game\":false,\"gameApp\":\"\"}", "core.family looks exactly as in PROTOCOL.md");
+                Check(!CoreFamily.Make(true, false, false, 0, false, null).Tray && !CoreFamily.Make(false, true, false, 0, false, null).Tray, "one tray icon only when the setting is on and core.txt really has its icon");
+                var off = CoreFamily.Make(true, true, false, now + 5, false, "cs2");
+                Check(off.FocusUntil == 0 && off.GameApp == "", "focus off has no end time; no game has no game name");
+
+                var t = new DateTime(2026, 11, 19, 14, 0, 0, DateTimeKind.Local);
+                Check(CoreFamily.Until(t.AddMinutes(90), t) == "15:30" && CoreFamily.Until(t.AddHours(19), t) == "завтра, 09:00" && CoreFamily.Until(new DateTime(2026, 11, 25, 9, 0, 0, DateTimeKind.Local), t) == "25 ноября, 09:00",
+                    "the end is said as a time, «tomorrow» or a date, got " + CoreFamily.Until(new DateTime(2026, 11, 25, 9, 0, 0, DateTimeKind.Local), t));
+                long until = (long)(t.AddMinutes(90).ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+                Check(CoreFamily.FocusLabel(CoreFamily.Make(true, true, true, until, false, null), t) == "Не беспокоить до 15:30", "the tray item says until when, got " + CoreFamily.FocusLabel(CoreFamily.Make(true, true, true, until, false, null), t));
+                Check(CoreFamily.FocusLabel(CoreFamily.Make(true, true, true, 0, false, null), t) == "Не беспокоить" && CoreFamily.FocusLabel(CoreFamily.Make(true, true, false, until, false, null), t) == "Не беспокоить" && CoreFamily.FocusLabel(null, t) == "Не беспокоить", "without an end time the item is plain");
+                Check(CoreFamily.Cut("  metla.txt ", 60) == "metla.txt" && CoreFamily.Cut(new string('а', 250), 200).Length == 200 && CoreFamily.Cut(null, 5) == "", "island notices are trimmed to the protocol limits");
+
+                // Команда show: какую страницу открыть
+                Func<object, string> show = delegate(object p) { return CoreFamily.ShowPage(p == null ? new System.Collections.Generic.Dictionary<string, object>() : Hub.Msg("page", p)); };
+                Check(show("games") == "games" && show("keys") == "keys" && show(" General ") == "general" && show("app:kapsula") == "app:kapsula" && show("replace") == "replace", "known pages are opened");
+                Check(show(null) == null && show("nonsense") == null && show("app:") == null && show("app:../x") == null && show("app:Kap sula") == null && show(5) == null && CoreFamily.ShowPage(null) == null, "an unknown page just shows the window");
+
+                // Команда focus.set: on обязательно, minutes — по желанию
+                bool fon;
+                double fmin;
+                Check(CoreFamily.FocusArgs(Hub.Msg("on", true, "minutes", 30), out fon, out fmin) == null && fon && fmin == 30, "focus.set with minutes is understood");
+                Check(CoreFamily.FocusArgs(Hub.Msg("on", false), out fon, out fmin) == null && !fon && fmin == 0, "focus.set off is understood");
+                Check(CoreFamily.FocusArgs(Hub.Msg("on", "yes"), out fon, out fmin) != null && CoreFamily.FocusArgs(new System.Collections.Generic.Dictionary<string, object>(), out fon, out fmin) != null && CoreFamily.FocusArgs(null, out fon, out fmin) != null, "focus.set without a clear on is refused");
+
+                // Через настоящий хаб (без сети): core.family ждёт тех, кто подпишется позже, focus.set доходит до core.txt
+                var hub = new Hub(null, false);
+                var toCore = new System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, object>>();
+                var toApp = new System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, object>>();
+                var coreClient = hub.Open(delegate(System.Collections.Generic.Dictionary<string, object> m) { toCore.Add(m); }, null);
+                hub.Receive(coreClient, MainWindow.Hello());
+                hub.Receive(coreClient, Hub.Msg("type", "state", "topic", CoreFamily.Topic, "data", CoreFamily.Make(true, true, true, 0, false, null).ToData()));
+                var appClient = hub.Open(delegate(System.Collections.Generic.Dictionary<string, object> m) { toApp.Add(m); }, null);
+                hub.Receive(appClient, Hub.Msg("type", "hello", "v", 1, "app", "smena", "name", "smena.txt", "version", "0.5.0", "commands", new object[] { "tray.run" }));
+                hub.Receive(appClient, Hub.Msg("type", "subscribe", "topics", new object[] { CoreFamily.Topic, "hub.apps" }));
+                FamilyState heard = null;
+                object appsNow = null;
+                foreach (var m in toApp)
+                {
+                    if (Json.Str(m, "type") != "state") continue;
+                    if (Json.Str(m, "topic") == CoreFamily.Topic && Json.Str(m, "from") == "core") heard = FamilyState.From(m["data"]);
+                    if (Json.Str(m, "topic") == "hub.apps") appsNow = m["data"];
+                }
+                Check(heard != null && heard.Tray && heard.Focus && !heard.Game, "an app that connects later still hears core.family");
+                Check(CoreFamily.Has(appsNow, "core", "show") && CoreFamily.Has(appsNow, "core", Family.FocusSet), "core.txt says it understands show and focus.set");
+                hub.Receive(appClient, Hub.Msg("type", "command", "id", "smena-1", "to", "core", "name", Family.FocusSet, "args", Hub.Msg("on", true)));
+                Check(toCore.Exists(delegate(System.Collections.Generic.Dictionary<string, object> m) { return Json.Str(m, "type") == "command" && Json.Str(m, "name") == Family.FocusSet && Json.Str(m, "from") == "smena"; }), "focus.set from an app reaches core.txt");
+            }
+
+            // Семья: пункты с полем section, общее меню в трее, кто что умеет и горячие клавиши
+            {
+                var st = Json.Parse("{\"groups\":[{\"title\":\"Клавиши\",\"items\":[{\"key\":\"replace\",\"type\":\"switch\"},{\"key\":\"games\",\"type\":\"switch\",\"section\":\"games\"}]},{\"title\":\"Запуск\",\"items\":[{\"key\":\"autostart\",\"type\":\"switch\",\"section\":\"startup\"},{\"key\":\"share\",\"type\":\"switch\",\"section\":\"family\"}]},{\"title\":\"Другое\",\"items\":[{\"key\":\"odd\",\"type\":\"switch\",\"section\":\"somewhere\"}]}]}");
+                var own = CoreFamily.OwnGroups(st);
+                Check(own.Count == 2 && own[0].Key == "Клавиши" && own[0].Value.Count == 1 && Json.Str(own[0].Value[0], "key") == "replace" && own[1].Key == "Другое", "the app page keeps its own items; a group that moved away entirely disappears");
+                Check(CoreFamily.ItemsIn(st, "games").Count == 1 && Json.Str(CoreFamily.ItemsIn(st, "startup")[0], "key") == "autostart" && CoreFamily.ItemsIn(st, "family").Count == 1 && CoreFamily.ItemsIn(null, "games").Count == 0, "items with a section go to the shared pages");
+                Check(string.Join(",", CoreFamily.MovedTo(st).ToArray()) == "games,startup,family" && CoreFamily.MovedTo(Json.Parse("{\"groups\":[]}")).Count == 0, "where the items went is known");
+                Check(CoreFamily.SectionOf(Json.Parse("{\"section\":\"somewhere\"}")) == null && CoreFamily.SectionOf(Json.Parse("{\"section\":\"games\"}")) == "games", "an unknown section stays on the app page");
+                Check(CoreFamily.MovedHint(new System.Collections.Generic.List<string> { "games" }) == "Поведение в играх — в разделе «Игры»"
+                    && CoreFamily.MovedHint(CoreFamily.MovedTo(st)) == "Запуск и обновления, связь с другими приложениями — в разделе «Общие»; поведение в играх — в разделе «Игры»"
+                    && CoreFamily.MovedHint(new System.Collections.Generic.List<string>()) == null, "the app page says what moved and where, got " + CoreFamily.MovedHint(CoreFamily.MovedTo(st)));
+
+                var catalog = new System.Collections.Generic.List<AppEntry> { new AppEntry { Id = "kapsula", Name = "Kapsula", Sprite = new string[] { "#E" } }, new AppEntry { Id = "aura", Name = "Aura" }, new AppEntry { Id = "smena", Name = "Smena" }, new AppEntry { Id = "dock", Name = "Dock" } };
+                var states = new System.Collections.Generic.Dictionary<string, object>();
+                Func<string, object> get = delegate(string topic) { object v; return states.TryGetValue(topic, out v) ? v : null; };
+                states["smena.tray"] = Json.Parse("{\"items\":[{\"key\":\"show\",\"label\":\"Открыть\"},{\"key\":\"pause\",\"label\":\"Приостановить\",\"check\":true}]}");
+                states["kapsula.tray"] = Json.Parse("{\"items\":[{\"key\":\"a\",\"label\":\"1\"},{\"key\":\"b\",\"label\":\"2\",\"enabled\":false},{\"label\":\"без ключа\"},{\"key\":\"c\",\"label\":\"3\"},{\"key\":\"d\",\"label\":\"4\"},{\"key\":\"e\",\"label\":\"5\"}]}");
+                states["aura.tray"] = Json.Parse("{\"items\":[]}");
+                states["dock.tray"] = Json.Parse("{\"items\":[{\"key\":\"x\",\"label\":\"Автоскрытие\",\"check\":false}]}");
+                states["newapp.tray"] = Json.Parse("{\"items\":[{\"key\":\"show\",\"label\":\"Открыть\"}]}");
+                var connected = new System.Collections.Generic.HashSet<string> { "smena", "kapsula", "aura", "newapp", "core" };
+                var byApp = CoreFamily.ByApp(catalog, delegate(string id) { return id == "smena" || id == "aura" ? st : null; }, CoreFamily.Startup);
+                Check(byApp.Count == 2 && byApp[0].Key.Id == "aura" && byApp[1].Key.Id == "smena" && byApp[1].Value.Count == 1 && Json.Str(byApp[1].Value[0], "key") == "autostart"
+                    && CoreFamily.ByApp(catalog, get, CoreFamily.Games).Count == 0, "shared pages group items by app, in catalogue order");
+                var groups = CoreFamily.TrayGroups(catalog, connected, get);
+                Check(groups.Count == 3 && groups[0].App == "kapsula" && groups[1].App == "smena" && groups[2].App == "newapp", "tray groups follow the catalogue; empty and disconnected apps are left out, unknown ones come last");
+                Check(groups.Count == 3 && groups[0].Items.Count == 4 && !groups[0].Items[1].Enabled && groups[0].Items[2].Key == "c" && groups[0].Name == "kapsula.txt" && groups[0].Sprite != null, "at most four items; a disabled one stays visible");
+                Check(groups.Count == 3 && groups[1].Items[1].Check == true && groups[1].Items[0].Check == null && groups[2].Name == "newapp.txt" && groups[2].Sprite == null, "check marks are read; an app outside the catalogue still has a name");
+
+                var hubApps = Json.ParseAny("[{\"app\":\"kapsula\",\"commands\":[\"show\",\"notify\"]},{\"app\":\"aura\",\"commands\":[\"show\"]}]");
+                Check(CoreFamily.Has(hubApps, "kapsula", "notify") && !CoreFamily.Has(hubApps, "aura", "notify") && !CoreFamily.Has(hubApps, "metla", "show") && !CoreFamily.Has(null, "kapsula", "notify"), "notices go to the island only when it says it can take them");
+
+                states["kapsula.keys"] = Json.Parse("{\"keys\":[{\"id\":\"dictate\",\"label\":\"Диктовка\",\"keys\":\"Ctrl+Alt+D\",\"on\":true},{\"id\":\"rec\",\"label\":\"Запись экрана\",\"keys\":\"Ctrl+Alt+R\",\"on\":false},{\"id\":\"area\",\"label\":\"Снимок\",\"keys\":\"Ctrl+Alt+S\",\"on\":true},{\"id\":\"copy\",\"label\":\"Копия\",\"keys\":\"ctrl + alt + s\",\"on\":true}]}");
+                states["aura.keys"] = Json.Parse("{\"keys\":[{\"id\":\"mute\",\"label\":\"Заглушить микрофон\",\"keys\":\"alt+ctrl+d\",\"on\":true},{\"id\":\"rec\",\"label\":\"Запись\",\"keys\":\"Ctrl+Alt+R\",\"on\":true},{\"id\":\"none\",\"label\":\"Пусто\",\"keys\":\"\",\"on\":true}]}");
+                states["dock.keys"] = Json.Parse("{\"keys\":[{\"id\":\"menu\",\"label\":\"Меню\",\"keys\":\"Ctrl+Alt+D\",\"on\":true}]}");   // dock не подключён
+                var rows = CoreFamily.KeyRows(catalog, connected, get);
+                int clashes = CoreFamily.FindClashes(rows);
+                Check(rows.Count == 7 && rows[0].App == "kapsula" && rows[4].App == "aura" && clashes == 2, "keys of connected apps in catalogue order, two clashes, got " + rows.Count + " rows, " + clashes + " clashes");
+                Check(rows.Count == 7 && CoreFamily.ClashText(rows[0]) == "то же сочетание: «Заглушить микрофон» в aura.txt" && CoreFamily.ClashText(rows[4]) == "то же сочетание: «Диктовка» в kapsula.txt", "a clash between apps names the other app and action");
+                Check(rows.Count == 7 && CoreFamily.ClashText(rows[2]) == "то же сочетание: «Копия» в этом же приложении", "a clash inside one app is found too");
+                Check(rows.Count == 7 && rows[1].Clash.Count == 0 && rows[5].Clash.Count == 0 && rows[6].Clash.Count == 0 && CoreFamily.ClashText(rows[1]) == null, "a switched-off or empty key clashes with nothing");
+                Check(string.Join(" ", CoreFamily.Caps("alt+ctrl+space").ToArray()) == "Ctrl Alt Пробел" && string.Join(" ", CoreFamily.Caps("Win").ToArray()) == "Win" && CoreFamily.Caps("").Count == 0, "keys are shown one by one, as on the keyboard");
+            }
+
             // Замена файла программы: новая версия ложится на место старой, лишнего рядом не остаётся
             string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-test-" + System.Diagnostics.Process.GetCurrentProcess().Id);
             System.IO.Directory.CreateDirectory(dir);
@@ -378,9 +549,97 @@ namespace DevTxt.Core
                 State.Paths.Remove("selftest-one");
             }
             finally { AppOps.HomeOverride = null; try { System.IO.Directory.Delete(dir, true); } catch { } }
+            Check(System.IO.File.Exists(State.FilePath), "install, move and removal saved their state into the temporary folder");
 
-            Console.WriteLine(failed == 0 ? "all passed" : failed + " failed");
-            return failed == 0 ? 0 : 1;
+            // Что core.txt помнит о семье, переживает перезапуск; испорченное время окончания выключает «Не беспокоить»,
+            // а не роняет окно и меню
+            {
+                long now = FamilyState.Now();
+                State.FamilyTray = false; State.Focus = true; State.FocusUntil = now + 3600000;
+                State.Save();
+                State.FamilyTray = true; State.Focus = false; State.FocusUntil = 0;
+                State.Load();
+                Check(!State.FamilyTray && State.Focus && State.FocusUntil == now + 3600000, "one tray icon and «do not disturb» with its end survive a restart");
+                State.Focus = true; State.FocusUntil = 0;
+                State.Save();
+                State.Focus = false;
+                State.Load();
+                Check(State.Focus && State.FocusUntil == 0, "«do not disturb» until switched off survives a restart");
+                System.IO.File.WriteAllText(State.FilePath, "{\"settings\":{\"focus\":true,\"focusUntil\":500000000000000}}");
+                State.Load();
+                Check(!State.Focus && State.FocusUntil == 0 && State.FamilyTray, "a broken end time turns «do not disturb» off; one tray icon is on by default");
+                System.IO.File.WriteAllText(State.FilePath, "{\"settings\":{\"focus\":true,\"focusUntil\":" + (now - 60000) + "}}");
+                State.Load();
+                Check(State.Focus && CoreFamily.FocusExpired(State.Focus, State.FocusUntil, now), "an end that passed while core.txt was closed turns it off on the first check");
+                Check(CoreFamily.FocusLabel(CoreFamily.Make(true, true, true, 500000000000000L, false, null), DateTime.Now) == "Не беспокоить" && CoreFamily.Ends(CoreFamily.Make(true, true, true, long.MaxValue, false, null)) == null,
+                    "a broken end time is not shown and does not throw");
+                Check(CoreFamily.UntilOk(CoreFamily.FocusUntil(1e9, now), now) && !CoreFamily.UntilOk(now + (CoreFamily.MaxFocusMinutes + 2) * 60000.0, now) && !CoreFamily.UntilOk(0, now), "only an end within a week is accepted");
+                State.Frozen = true;
+                System.IO.File.Delete(State.FilePath);
+                State.Save();
+                Check(!System.IO.File.Exists(State.FilePath), "the demo writes nothing");
+                State.Frozen = false;
+                State.Focus = false; State.FocusUntil = 0; State.FamilyTray = true;
+            }
+
+            // Уведомления core.txt и core.family: куда уходит уведомление, и одно и то же состояние второй раз не шлётся
+            {
+                Check(CoreFamily.NotifyRoute(true, true, true, true) == "island" && CoreFamily.NotifyRoute(false, true, false, false) == "balloon"
+                    && CoreFamily.NotifyRoute(false, true, true, false) == null && CoreFamily.NotifyRoute(false, true, false, true) == null && CoreFamily.NotifyRoute(false, false, false, false) == null,
+                    "a notice goes to the island; without it — to Windows, but not during «do not disturb», a game, or without an icon");
+                var fo = new FamilyOut();
+                Check(fo.Changed(CoreFamily.Make(true, true, false, 0, false, null)) && !fo.Changed(CoreFamily.Make(true, true, false, 0, false, null))
+                    && fo.Changed(CoreFamily.Make(true, true, true, 0, false, null)) && fo.Changed(CoreFamily.Make(true, true, false, 0, false, null)), "core.family is sent only when it changes");
+            }
+
+            // Клавиши — как на клавиатуре, а не английскими словами кода; плюс на цифровой клавиатуре не теряется
+            {
+                Func<int, int, string> caps = delegate(int mods, int vk) { return string.Join("|", CoreFamily.Caps(KeyNames.Text(mods, vk)).ToArray()); };
+                Check(caps(2, 0x6B) == "Ctrl|Num +" && CoreFamily.Norm("ctrl + num+") == "Ctrl+Num+" && CoreFamily.Norm("Ctrl+Num+") != CoreFamily.Norm("Ctrl+Num-") && CoreFamily.Norm("Num+") == "Num+",
+                    "the keypad plus keeps its plus, got " + caps(2, 0x6B));
+                Check(caps(3, 0x22) == "Ctrl|Alt|PgDn" && caps(0, 0xB3) == "Воспр./пауза" && caps(0, 0xAF) == "Громче" && caps(1, 0xC0) == "Alt|Ё" && caps(8, 0x5D) == "Win|Меню"
+                    && caps(2, 0x99) == "Ctrl|Клавиша 99" && caps(0, 0x61) == "Num 1" && caps(4, 0x2C) == "Shift|PrtSc",
+                    "keys are named as on the keyboard, got " + caps(3, 0x22) + " " + caps(1, 0xC0) + " " + caps(8, 0x5D));
+            }
+
+            // Сценарии про игры: игра на весь экран (core.family) или игра из Steam (arkada.game) — хватит одного
+            {
+                var states = new System.Collections.Generic.Dictionary<string, object>();
+                var sent = new System.Collections.Generic.List<string>();
+                Func<bool, object> kapsula = delegate(bool hide) { return Json.Parse("{\"groups\":[{\"items\":[{\"key\":\"autoHide\",\"type\":\"switch\",\"value\":" + (hide ? "true" : "false") + "},{\"key\":\"walk\",\"type\":\"switch\",\"value\":true}]}]}"); };
+                var sc = new Scenarios(
+                    delegate(string topic) { object v; return states.TryGetValue(topic, out v) ? v : null; },
+                    delegate(string target, string key, object value) { sent.Add(target + "." + key + "=" + value); if (key == "autoHide") states["kapsula.settings"] = kapsula(value is bool && (bool)value); },
+                    delegate(string id) { return id == "game-hide-island"; });
+                states["kapsula.settings"] = kapsula(false);
+                Check(!sc.Update() && sent.Count == 0, "no game — nothing to do");
+                states[CoreFamily.Topic] = CoreFamily.Make(true, true, false, 0, true, "cs2").ToData();
+                Check(sc.Update() && sent.Count == 1 && sent[0] == "kapsula.autoHide=True" && sc.IsActive("game-hide-island"), "a full-screen game hides the island without arkada.txt");
+                states[CoreFamily.Topic] = CoreFamily.Make(true, true, false, 0, false, null).ToData();
+                states["arkada.game"] = Json.Parse("{\"appId\":730,\"name\":\"Counter-Strike 2\",\"since\":1}");
+                Check(!sc.Update() && sent.Count == 1 && sc.IsActive("game-hide-island"), "a Steam game in a window keeps the island hidden");
+                states.Remove("arkada.game");
+                Check(sc.Update() && sent.Count == 2 && sent[1] == "kapsula.autoHide=False" && !sc.IsActive("game-hide-island"), "no game at all — the island comes back");
+                states["kapsula.settings"] = kapsula(true);
+                states[CoreFamily.Topic] = CoreFamily.Make(true, true, false, 0, true, "cs2").ToData();
+                Check(sc.Update() && sent.Count == 2 && sc.IsActive("game-hide-island"), "a scenario that needs no change still says it now works — its note is refreshed");
+                Check(Array.TrueForAll(Scenarios.All, delegate(Scenario x) { return !x.Game || Array.IndexOf(x.Needs, "arkada") < 0; }), "game scenarios do not need arkada.txt");
+            }
+
+            // async-метод, начатый до app.Run() (проверка обновлений из конструктора окна), продолжается в потоке окна,
+            // а не в пуле потоков: иначе первое же обращение к окну роняло core.txt
+            {
+                Program.UiContext();
+                int ui = Thread.CurrentThread.ManagedThreadId, after = -1;
+                var frame = new DispatcherFrame();
+                var stop = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+                stop.Tick += delegate { stop.Stop(); frame.Continue = false; };
+                stop.Start();
+                AfterAwait(delegate(int id) { after = id; frame.Continue = false; });
+                if (after == -1) Dispatcher.PushFrame(frame);
+                stop.Stop();
+                Check(after == ui, "work started before the window loop continues on the window thread");
+            }
         }
 
         public static int Latest()

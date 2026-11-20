@@ -15,8 +15,10 @@ namespace DevTxt.Core
         public string Id, Title, Hint;
         public string[] Needs;      // какие приложения участвуют
         public string Topic, Field; // условие: поле Field состояния Topic истинно (Field == null — состояние просто есть)
+        public string OrTopic, OrField;   // …или то же для второго состояния (null — второго условия нет)
         public string Target, Key;  // что менять: настройка Key приложения Target…
         public object On;           // …на это значение, пока условие верно
+        public bool Game;           // про игры: показывается на странице «Игры», а не в «Сценариях»
     }
 
     class Scenarios
@@ -35,17 +37,21 @@ namespace DevTxt.Core
                 Hint = "Тишина во всех программах, пока вы заглушены в звонке",
                 Needs = new string[] { "maska", "aura" }, Topic = "maska.voice", Field = "mute", Target = "aura", Key = "mute", On = true
             },
+            // Игра — по общему правилу core.txt (core.family.game: впереди окно на весь экран), а с arkada.txt — ещё и
+            // всё время, пока запущена игра из Steam, даже в окне. Поэтому arkada.txt желательна, но не обязательна.
             new Scenario
             {
                 Id = "game-hide-island", Title = "Во время игры прятать остров",
-                Hint = "Пока запущена игра из Steam, остров уезжает за край и не мешает. После игры — как было",
-                Needs = new string[] { "arkada", "kapsula" }, Topic = "arkada.game", Field = null, Target = "kapsula", Key = "autoHide", On = true
+                Hint = "Пока впереди игра на весь экран или идёт игра из Steam (с arkada.txt), остров уезжает за край. Потом — как было",
+                Needs = new string[] { "kapsula" }, Topic = CoreFamily.Topic, Field = "game", OrTopic = "arkada.game", OrField = null,
+                Target = "kapsula", Key = "autoHide", On = true, Game = true
             },
             new Scenario
             {
                 Id = "game-pet-home", Title = "Во время игры зверёк не гуляет по окнам",
-                Hint = "Пока запущена игра из Steam, зверёк сидит в капсуле",
-                Needs = new string[] { "arkada", "kapsula" }, Topic = "arkada.game", Field = null, Target = "kapsula", Key = "walk", On = false
+                Hint = "Пока впереди игра на весь экран или идёт игра из Steam (с arkada.txt), зверёк сидит в капсуле",
+                Needs = new string[] { "kapsula" }, Topic = CoreFamily.Topic, Field = "game", OrTopic = "arkada.game", OrField = null,
+                Target = "kapsula", Key = "walk", On = false, Game = true
             },
         };
 
@@ -89,20 +95,29 @@ namespace DevTxt.Core
 
         public bool IsActive(string id) { bool on; return active.TryGetValue(id, out on) && on; }
 
-        // Сверяет все сценарии с тем, что сейчас известно хабу. Вызывается после каждого изменения состояний
-        // и после того, как сценарий включили или выключили.
-        public void Update()
+        // Условие сценария верно прямо сейчас
+        bool Holds(Scenario s)
         {
+            return Truthy(state(s.Topic), s.Field) || s.OrTopic != null && Truthy(state(s.OrTopic), s.OrField);
+        }
+
+        // Сверяет все сценарии с тем, что сейчас известно хабу. Вызывается после каждого изменения состояний
+        // и после того, как сценарий включили или выключили. true — какой-то сценарий начал или перестал действовать:
+        // его записку («действует сейчас») на странице пора обновить.
+        public bool Update()
+        {
+            bool changed = false;
             foreach (var s in All)
             {
                 bool was = IsActive(s.Id);
-                bool want = enabled(s.Id) && Truthy(state(s.Topic), s.Field);
+                bool want = enabled(s.Id) && Holds(s);
                 if (want == was) continue;
                 if (want)
                 {
                     object current = SettingValue(state(s.Target + ".settings"), s.Key);
                     if (current == null) continue;   // приложение не подключено или такой настройки сейчас нет — попробуем при следующем изменении
                     active[s.Id] = true;
+                    changed = true;
                     if (Same(current, s.On)) continue;   // уже как надо: менять нечего и возвращать потом нечего
                     previous[s.Id] = current;
                     set(s.Target, s.Key, s.On);
@@ -110,6 +125,7 @@ namespace DevTxt.Core
                 else
                 {
                     active[s.Id] = false;
+                    changed = true;
                     object before;
                     if (!previous.TryGetValue(s.Id, out before)) continue;
                     previous.Remove(s.Id);
@@ -118,6 +134,7 @@ namespace DevTxt.Core
                     if (current != null && Same(current, s.On)) set(s.Target, s.Key, before);
                 }
             }
+            return changed;
         }
     }
 }

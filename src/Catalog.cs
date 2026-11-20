@@ -195,9 +195,14 @@ namespace DevTxt.Core
     // Что лаунчер помнит: где лежат приложения и какие версии он видел в прошлый раз
     static class State
     {
-        public static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "dev.txt", "core");
+        static readonly string HomeDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "dev.txt", "core");
+        // Для --selftest: всё, что State читает и пишет, — во временной папке, а не в настоящих настройках core.txt
+        public static string DirOverride;
+        // Для --demo: ничего не записывается
+        public static bool Frozen;
+        public static string Dir { get { return DirOverride ?? HomeDir; } }
         public static string CatalogFile { get { return Path.Combine(Dir, "catalog.json"); } }
-        static string FilePath { get { return Path.Combine(Dir, "state.json"); } }
+        internal static string FilePath { get { return Path.Combine(Dir, "state.json"); } }
 
         public static Dictionary<string, string> Paths = new Dictionary<string, string>();
         public static Dictionary<string, Release> Latest = new Dictionary<string, Release>();
@@ -211,6 +216,9 @@ namespace DevTxt.Core
         public static bool Onboarded;             // первый запуск пройден
         public static bool GatherPending;         // после установки core.txt перенести приложения в общий дом
         public static bool TrayHint;              // про то, что core.txt остаётся в трее, уже сказали
+        public static bool FamilyTray = true;     // один значок в трее для всех приложений dev.txt — у core.txt
+        public static bool Focus;                 // «Не беспокоить» для всех приложений
+        public static long FocusUntil;            // когда «Не беспокоить» выключится само: мс с 1970 года (UTC); 0 — пока не выключат
         public static string Section;             // раздел, открытый в прошлый раз
         public static double WinX = double.NaN, WinY = double.NaN, WinW, WinH;   // где и какого размера было окно
         public static bool WinMax;
@@ -266,8 +274,19 @@ namespace DevTxt.Core
                 Onboarded = Flag(set, "onboarded", false);
                 GatherPending = Flag(set, "gather", false);
                 TrayHint = Flag(set, "trayHint", false);
+                FamilyTray = Flag(set, "familyTray", true);
+                // «Не беспокоить» на время: окончание — не дальше недели вперёд. Испорченное или поправленное руками время
+                // не роняет окно и меню, а выключает режим: молчать неизвестно сколько хуже, чем показать уведомление
+                Focus = Flag(set, "focus", false);
+                double until = Number(set, "focusUntil", 0);
+                FocusUntil = 0;
+                if (Focus && until > 0)
+                {
+                    if (CoreFamily.UntilOk(until, FamilyState.Now())) FocusUntil = (long)until;
+                    else Focus = false;
+                }
                 string section = Json.Str(set, "section");
-                Section = section != null && System.Text.RegularExpressions.Regex.IsMatch(section, "^(apps|scenarios|general|replace|app:[a-z][a-z0-9-]{0,31})$") ? section : null;
+                Section = section != null && System.Text.RegularExpressions.Regex.IsMatch(section, "^(apps|scenarios|general|games|keys|replace|app:[a-z][a-z0-9-]{0,31})$") ? section : null;
                 var win = Json.Obj(d, "window");
                 WinX = Number(win, "x", double.NaN); WinY = Number(win, "y", double.NaN);
                 WinW = Number(win, "w", 0); WinH = Number(win, "h", 0);
@@ -280,12 +299,13 @@ namespace DevTxt.Core
 
         public static void Save()
         {
+            if (Frozen) return;
             try
             {
                 var latest = new Dictionary<string, object>();
                 foreach (var p in Latest) latest[p.Key] = p.Value.ToDict();
                 var set = new Dictionary<string, object> { { "accent", Accent }, { "reducedMotion", ReducedMotion }, { "tray", Tray }, { "autoCheck", AutoCheck }, { "onboarded", Onboarded }, { "gather", GatherPending },
-                    { "trayHint", TrayHint }, { "section", Section } };
+                    { "trayHint", TrayHint }, { "section", Section }, { "familyTray", FamilyTray }, { "focus", Focus }, { "focusUntil", Focus ? FocusUntil : 0L } };
                 var d = new Dictionary<string, object> { { "paths", Paths }, { "latest", latest }, { "checked", Checked.Ticks.ToString() }, { "settings", set },
                     { "scenarios", new List<string>(Scenarios) }, { "pending", Pending } };
                 if (WinW > 0 && WinH > 0 && !double.IsNaN(WinX) && !double.IsNaN(WinY))

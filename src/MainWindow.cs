@@ -1,5 +1,7 @@
 // core.txt. MainWindow.cs — окно: шапка с вкладками, страницы (приложения, сценарии, настройки, первый запуск),
-// строка состояния. Здесь же окно держит хаб, сценарии и значок в трее.
+// строка состояния. Здесь же окно держит хаб, сценарии и значок в трее — один на всю семью dev.txt: core.txt
+// сообщает всем core.family («Не беспокоить», игра на весь экран, чей значок в трее) и собирает в своё меню
+// быстрые действия приложений (kit.txt, hub/PROTOCOL.md, раздел «Семья»; расчёты — в CoreFamily.cs).
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -20,7 +22,7 @@ namespace DevTxt.Core
         const double W = 1120, H = 720;
         const int PApps = 0, PScenarios = 1, PSettings = 2, PWelcome = 3;
         // Значок core.txt — тот же рисунок, что в kit.txt (icons/sprites.json, «core»)
-        static readonly string[] CoreSprite = { ".....#....", "....##....", ".########.", "##########", ".########.", "..######..", "...##E#...", "...##E#...", "..######..", ".########.", "##########", ".########." };
+        internal static readonly string[] CoreSprite = { ".....#....", "....##....", ".########.", "##########", ".########.", "..######..", "...##E#...", "...##E#...", "..######..", ".########.", "##########", ".########." };
 
         internal readonly bool DemoMode;
         internal readonly List<Card> Cards = new List<Card>();
@@ -52,10 +54,28 @@ namespace DevTxt.Core
         int commandSeq;
         System.Windows.Forms.NotifyIcon tray;
 
+        // Семья: что core.txt сейчас сообщает всем (core.family) и что впереди на экране
+        FamilyState family = new FamilyState();
+        readonly FamilyOut familyOut = new FamilyOut();   // одно и то же core.family второй раз не шлём
+        bool gameNow;           // впереди игра или другое окно на весь экран
+        string gameAppNow = "";
+        readonly DispatcherTimer familyTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        // О чём было последнее уведомление: щелчок по нему (на острове или в Windows) открывает эту страницу
+        string noticePage;
+        DateTime noticeAt = DateTime.MinValue;
+
         [DllImport("dwmapi.dll")]
         static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+        [DllImport("user32.dll")]
+        static extern bool AllowSetForegroundWindow(int pid);
 
-        public MainWindow(bool demo, int startPage, bool afterInstall)
+        // Человек только что щёлкнул в core.txt — значит, Windows разрешает ему выводить окна вперёд. Этим правом
+        // делимся с тем, кого просим показать окно: иначе окно другого приложения откроется позади остальных
+        // или только мигнёт на панели задач. -1 — любому процессу, до следующего действия человека.
+        internal static void LetForeground() { try { AllowSetForegroundWindow(-1); } catch { } }
+
+        // startSection — раздел настроек, который открыть сразу («general», «games», «keys», «replace», «app:<id>»)
+        public MainWindow(bool demo, int startPage, string startSection, bool afterInstall)
         {
             DemoMode = demo;
             page = !demo && !State.Onboarded ? PWelcome : startPage;
@@ -65,6 +85,7 @@ namespace DevTxt.Core
             // Родное окно Windows 11: системная рамка и тень, Mica, тема Windows, размер меняется, окно прилипает к краям
             Ui.ThemeFollows = !demo;
             Ui.Native(this, true);
+            if (demo && Environment.GetEnvironmentVariable("CORE_DEMO_LIGHT") != null) Ui.ApplyTheme(true);   // снимок в светлой теме
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             if (!demo) PlaceWindow();
             ApplyAccent();
@@ -82,6 +103,7 @@ namespace DevTxt.Core
                 delegate(string id) { return State.Scenarios.Contains(id); });
             Content = Build();
             BuildCards();
+            if (startSection != null) settings.Section = startSection;
             if (!demo && page == PApps) RestoreSection();
             ShowPage(page);
             // Esc убирает вопрос об удалении с карточки
@@ -95,6 +117,10 @@ namespace DevTxt.Core
 
             StartHub();
             StartTray();
+            // core.family — сразу, как только есть хаб и значок: приложения при запуске ждут его, чтобы не мигать своими значками
+            PublishFamily();
+            familyTimer.Tick += delegate { CheckFamily(); };
+            familyTimer.Start();
             timer.Tick += delegate { RefreshLocal(); TaskbarGuard.Check(); };   // док пропал, а панель задач спрятана — возвращаем
             timer.Start();
             launchTimer.Tick += delegate { WatchLaunches(); };
@@ -106,17 +132,16 @@ namespace DevTxt.Core
                     // Окно закрыли — core.txt остаётся в трее и держит хаб. В первый раз говорим об этом
                     e.Cancel = true;
                     Hide();
-                    if (!State.TrayHint && tray != null)
-                    {
+                    // Сказали — больше не повторяем. Промолчали («Не беспокоить», игра впереди) — скажем в следующий раз
+                    if (!State.TrayHint && tray != null && Notify("core.txt остался в трее", "Приложения dev.txt по-прежнему на связи. Выход — в меню значка", null))
                         State.TrayHint = true;
-                        Notify("core.txt остался в трее", "Приложения dev.txt по-прежнему на связи. Выход — в меню значка");
-                    }
                     State.Save();
                     return;
                 }
                 State.Save();
+                familyTimer.Stop();
                 if (tray != null) { tray.Visible = false; tray.Dispose(); }
-                if (server != null) server.Stop();
+                if (server != null) server.Stop();   // связь пропала — приложения сразу показывают свои значки
             };
             if (State.Onboarded)
             {
@@ -265,7 +290,7 @@ namespace DevTxt.Core
         // Разделы слева. Собираются заново, только когда меняется их список (появилось или пропало приложение).
         void BuildNav()
         {
-            var keys = new List<string> { "apps", "scenarios", "general", "replace" };
+            var keys = new List<string> { "apps", "scenarios", "general", "games", "keys", "replace" };
             foreach (var c in Cards) if (HasSettings(c)) keys.Add("app:" + c.App.Id);
             string sig = string.Join(",", keys.ToArray());
             if (sig != navSig)
@@ -278,6 +303,8 @@ namespace DevTxt.Core
                 add("scenarios", "Сценарии", Ui.Glyph("\uE945"));
                 shell.Header("Настройки");
                 add("general", "Общие", Ui.Glyph("\uE713"));
+                add("games", "Игры", Ui.Glyph("\uE7FC"));
+                add("keys", "Клавиши", Ui.Glyph("\uE765"));
                 add("replace", "Замены Windows", Ui.Glyph("\uE770"));
                 bool any = false;
                 foreach (var c in Cards)
@@ -293,7 +320,9 @@ namespace DevTxt.Core
             if (page == PWelcome) shell.Title("", "");
             else if (key2 == "apps") shell.Title("Приложения", "Установить, обновить и открыть всё, что есть в dev.txt");
             else if (key2 == "scenarios") shell.Title("Сценарии", "Приложения помогают друг другу сами — включите то, что нужно");
-            else if (key2 == "general") shell.Title("Общие", "Вид, запуск, папка и обновления — для всех приложений сразу");
+            else if (key2 == "general") shell.Title("Общие", "Вид, «Не беспокоить», запуск и обновления — для всех приложений сразу");
+            else if (key2 == "games") shell.Title("Игры", "Что делают приложения, пока впереди игра или другое окно на весь экран");
+            else if (key2 == "keys") shell.Title("Клавиши", "Горячие клавиши всех приложений dev.txt и что с чем совпало");
             else if (key2 == "replace") shell.Title("Замены Windows", "Что из Windows заменяют приложения dev.txt. Выключите — и Windows вернётся как была");
             else if (key2.StartsWith("app:"))
             {
@@ -384,6 +413,13 @@ namespace DevTxt.Core
             if (notice != null) line = notice;
             else if (updatingSelf) line = "Обновляю core.txt…";
             else if (checking) line = "Проверяю обновления…";
+            else if (page == PSettings && settings.Section == "keys" && KeyRows().Count > 0)
+            {
+                // Итог страницы «Клавиши»: сколько сочетаний и есть ли совпадения. Пустая страница говорит о связи, как остальные
+                var rows = KeyRows();
+                int clashes = CoreFamily.FindClashes(rows);
+                line = "Сочетаний: " + rows.Count + (clashes > 0 ? " · совпадений: " + clashes + " — поменяйте сочетание в одном из приложений" : " · совпадений нет");
+            }
             else if (page == PSettings) line = server != null && server.Error != null ? "Связь между приложениями не работает: " + server.Error : "Связь между приложениями работает · подключено: " + connectedApps.Count;
             else if (page == PScenarios) line = "Сценарии действуют, пока core.txt запущен";
             else line = (updates > 0 ? "Обновлений: " + updates + " · " : "") + when;
@@ -406,9 +442,15 @@ namespace DevTxt.Core
             server.Start(Hub.DefaultPort);   // порт занят — остальное работает, просто приложения не подключатся (причина — в строке состояния)
             // Сам core.txt — такое же приложение хаба, только без сети
             local = hub.Open(delegate(Dictionary<string, object> m) { Dispatcher.BeginInvoke(new Action(delegate { OnHub(m); })); }, null);
-            hub.Receive(local, Hub.Msg("type", "hello", "v", Hub.Protocol, "app", "core", "name", "core.txt", "version", Program.VersionText, "commands", new object[] { "show" }));
+            hub.Receive(local, Hello());
             hub.Receive(local, Hub.Msg("type", "subscribe", "topics", new object[] { "*" }));
             hub.ThemeChanged += delegate { Dispatcher.BeginInvoke(new Action(delegate { TakeTheme(); })); };
+        }
+
+        // Как core.txt представляется своему хабу: такое же приложение, только без сети
+        internal static Dictionary<string, object> Hello()
+        {
+            return Hub.Msg("type", "hello", "v", Hub.Protocol, "app", "core", "name", "core.txt", "version", Program.VersionText, "commands", new object[] { "show", Family.FocusSet });
         }
 
         void OnHub(Dictionary<string, object> m)
@@ -430,8 +472,10 @@ namespace DevTxt.Core
                         if (app != null && app != "core") connectedApps.Add(app);
                     }
                 }
-                scenarios.Update();
-                if (page == PScenarios || (page == PSettings && (topic == "hub.apps" || topic.EndsWith(".settings")))) RenderAll();
+                // Сценарий начал или перестал действовать — его записка на «Сценариях» и «Играх» должна это сказать,
+                // даже если ни одна настройка при этом не поменялась
+                bool moved = scenarios.Update();
+                if (page == PScenarios || (page == PSettings && (moved || topic == "hub.apps" || topic.EndsWith(".settings") || topic.EndsWith(".keys")))) RenderAll();
             }
             else if (type == "result")
             {
@@ -451,14 +495,54 @@ namespace DevTxt.Core
             }
             else if (type == "command")
             {
-                bool known = Json.Str(m, "name") == "show";
-                if (known) ShowWindow();
+                string name = Json.Str(m, "name");
+                var args = Json.Obj(m, "args") ?? new Dictionary<string, object>();
                 object id, from;
                 m.TryGetValue("id", out id); m.TryGetValue("from", out from);
-                var reply = Hub.Msg("type", "result", "id", id, "to", from, "ok", known);
-                if (!known) reply["error"] = "unknown-command";
+                var reply = Hub.Msg("type", "result", "id", id, "to", from, "ok", true);
+                try
+                {
+                    if (name == "show") ShowFromHub(args, from as string);   // и щелчок по карточке на острове
+                    else if (name == Family.FocusSet)
+                    {
+                        bool on;
+                        double minutes;
+                        string bad = CoreFamily.FocusArgs(args, out on, out minutes);
+                        if (bad != null) throw new Exception(bad);
+                        SetFocus(on, minutes);
+                        reply["data"] = family.ToData();   // ответ — новое core.family
+                    }
+                    else { reply["ok"] = false; reply["error"] = "unknown-command"; }
+                }
+                catch (Exception e) { reply["ok"] = false; reply["error"] = e.Message; }
                 hub.Receive(local, reply);
             }
+        }
+
+        // Команда show: показать окно и, если названа знакомая страница, открыть её. Незнакомая — окно просто показывается.
+        // from — кто просит: приложение, которое открывает «Общие» или «Игры» ради своих пунктов, увидит их сразу.
+        void ShowFromHub(Dictionary<string, object> args, string from)
+        {
+            ShowWindow();
+            string key = CoreFamily.ShowPage(args);
+            // Щелчок по карточке core.txt на острове приходит как show без страницы: открываем то, о чём была карточка
+            if (key == null && from == "kapsula") key = TakeNoticePage();
+            if (key == null || page == PWelcome) return;   // первый запуск не прерываем
+            if (key.StartsWith("app:"))
+            {
+                Card c = Find(key.Substring(4));
+                if (c == null || !HasSettings(c)) return;
+            }
+            if (key != CurrentKey) Go(key);
+            if ((key == "general" || key == "games") && from != null) settings.Reveal(from);
+        }
+
+        // Страница последнего уведомления, если оно было недавно; забирается один раз
+        string TakeNoticePage()
+        {
+            string key = noticePage != null && DateTime.UtcNow - noticeAt < TimeSpan.FromMinutes(10) ? noticePage : null;
+            noticePage = null;
+            return key;
         }
 
         // Команда приложению от человека: чем она кончилась, скажет строка состояния
@@ -505,6 +589,75 @@ namespace DevTxt.Core
             State.Save();
             RenderAll();
         }
+
+        // ───────── Семья: core.family, «Не беспокоить», игра на весь экран ─────────
+
+        // Что core.txt сейчас сообщает всем приложениям
+        internal FamilyState FamilyNow { get { return family; } }
+
+        // Что приложение сообщило хабу последним; null — ничего или оно отключилось
+        internal object StateOf(string topic) { object data; return States.TryGetValue(topic, out data) ? data : null; }
+
+        // Приложение подключено и понимает команду (по hub.apps)
+        internal bool AppHas(string app, string command) { return CoreFamily.Has(StateOf("hub.apps"), app, command); }
+
+        // Горячие клавиши подключённых приложений, в порядке каталога, с совпадениями
+        internal List<KeyRow> KeyRows() { return CoreFamily.KeyRows(Cards.ConvertAll(delegate(Card c) { return c.App; }), connectedApps, StateOf); }
+
+        // Раз в секунду: не кончилось ли «Не беспокоить» и не впереди ли игра. Отдаётся только то, что изменилось.
+        void CheckFamily()
+        {
+            string app;
+            gameNow = FullScreen.Ahead(out app);
+            gameAppNow = app ?? "";
+            PublishFamily();
+        }
+
+        // Собирает core.family из настроек и того, что сейчас на экране, и отдаёт хабу, если что-то изменилось.
+        // Хаб не возвращает приложению его же состояние — поэтому core.family кладётся и в свои States.
+        void PublishFamily()
+        {
+            if (CoreFamily.FocusExpired(State.Focus, State.FocusUntil, FamilyState.Now()))
+            {
+                State.Focus = false;
+                State.FocusUntil = 0;
+                if (!DemoMode) State.Save();
+            }
+            var next = DemoMode
+                ? CoreFamily.Make(State.FamilyTray, true, State.Focus, State.FocusUntil, family.Game, family.GameApp)   // на снимках игра выдуманная
+                : CoreFamily.Make(State.FamilyTray, tray != null, State.Focus, State.FocusUntil, gameNow, gameAppNow);
+            if (!familyOut.Changed(next)) return;
+            family = next;
+            var data = next.ToData();
+            States[CoreFamily.Topic] = data;
+            if (hub != null && local != null) hub.Receive(local, Hub.Msg("type", "state", "topic", CoreFamily.Topic, "data", data));
+            scenarios.Update();
+            RenderAll();
+        }
+
+        // «Не беспокоить» для всех: из окна, из меню значка и командой focus.set. minutes <= 0 — пока не выключат.
+        internal void SetFocus(bool on, double minutes)
+        {
+            State.Focus = on;
+            State.FocusUntil = on ? CoreFamily.FocusUntil(minutes, FamilyState.Now()) : 0;
+            if (!DemoMode) State.Save();
+            PublishFamily();
+        }
+
+        // Один значок в трее на всю семью: выключили — приложения сразу показывают свои
+        internal void SetFamilyTray(bool on)
+        {
+            State.FamilyTray = on;
+            if (!DemoMode) State.Save();
+            PublishFamily();
+        }
+
+        // Пункт приложения в общем меню: команда уходит тихо, строку состояния ответ не трогает.
+        // Пункт может открыть окно приложения — разрешаем ему выйти вперёд.
+        void RunTray(string app, string key) { LetForeground(); SendCommand(app, Family.TrayRun, Hub.Msg("key", key), false); }
+
+        // Открыть другое приложение на его странице («Изменить» на «Клавишах»). Чем кончилось — скажет строка состояния.
+        internal void ShowApp(string app, string page) { LetForeground(); SendCommand(app, "show", Hub.Msg("page", page)); }
 
         // ───────── Сценарии ─────────
         internal bool ScenarioActive(string id) { return scenarios.IsActive(id); }
@@ -628,29 +781,53 @@ namespace DevTxt.Core
                     Text = "core.txt", Visible = true
                 };
                 tray.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e) { if (e.Button == System.Windows.Forms.MouseButtons.Left) ShowWindow(); };
-                tray.BalloonTipClicked += delegate { ShowWindow(); };   // щелчок по уведомлению открывает core.txt
+                tray.BalloonTipClicked += delegate { OpenNotice(); };   // щелчок по уведомлению открывает core.txt там, о чём оно
                 // Меню Windows 11, а не серое меню WinForms
                 tray.MouseUp += delegate(object s, System.Windows.Forms.MouseEventArgs e)
                 {
                     if (e.Button != System.Windows.Forms.MouseButtons.Right) return;
                     var menu = new PopMenu();
-                    menu.Brand(CoreSprite, "core");
-                    menu.Item("Открыть core.txt", false, ShowWindow);
-                    menu.Item("Проверить обновления", false, delegate { ShowWindow(); CheckAll(); });
-                    menu.Item("Запускать вместе с Windows", Autostart.Enabled, delegate { Autostart.Set(!Autostart.Enabled); RenderAll(); });
-                    menu.Line();
-                    menu.Item("Выход", false, Quit);
+                    FillTrayMenu(menu);
                     menu.ShowAtCursor();
                 };
             }
             catch { tray = null; }
         }
 
+        // Одно меню на всю семью: быстрые действия подключённых приложений (их <app>.tray), под ними — общие пункты.
+        // Приложение отключилось — его состояние пропало, и в меню его больше нет.
+        void FillTrayMenu(PopMenu menu)
+        {
+            menu.Brand(CoreSprite, "core");
+            if (State.FamilyTray)
+            {
+                var groups = CoreFamily.TrayGroups(Cards.ConvertAll(delegate(Card c) { return c.App; }), connectedApps, StateOf);
+                foreach (var g in groups)
+                {
+                    menu.Caption(g.Sprite, g.Name);
+                    foreach (var t in g.Items)
+                    {
+                        string app = g.App, key = t.Key;
+                        menu.Item(t.Label, t.Check == true, t.Enabled ? (Action)delegate { RunTray(app, key); } : null);
+                    }
+                }
+                if (groups.Count > 0) menu.Line();
+            }
+            menu.Item(CoreFamily.FocusLabel(family, DateTime.Now), State.Focus, delegate { SetFocus(!State.Focus, 0); });
+            menu.Item("Открыть core.txt", false, ShowWindow);
+            menu.Item("Проверить обновления", false, delegate { ShowWindow(); CheckAll(); });
+            // Своя строка core.txt, а не всей семьи: так же она называется в «Общих» (у приложений — свои, там же)
+            menu.Item("Запускать core.txt вместе с Windows", DemoMode || Autostart.Enabled, delegate { if (!DemoMode) Autostart.Set(!Autostart.Enabled); RenderAll(); });
+            menu.Line();
+            menu.Item("Выход", false, Quit);
+        }
+
         public void ShowWindow()
         {
             Show();
             if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
-            Activate();
+            // Показать просит другое приложение, а Windows не отдала окну фокус: тогда хотя бы поверх остальных окон
+            if (!Activate()) { Topmost = true; Topmost = false; }
             RefreshLocal();
         }
 
@@ -706,7 +883,7 @@ namespace DevTxt.Core
             checking = false;
             RenderAll();
             int updates = Cards.FindAll(delegate(Card c) { return c.S.UpdateAvailable; }).Count + (SelfUpdate.Available ? 1 : 0);
-            if (updates > 0) Notify("Есть обновления: " + updates, "Откройте core.txt, чтобы обновить");
+            if (updates > 0) Notify("Есть обновления: " + updates, "Откройте core.txt, чтобы обновить", "apps");
         }
 
         // Проверка обновлений: ни один запрос не прошёл
@@ -760,15 +937,37 @@ namespace DevTxt.Core
             InstalledApps.Sync(app, c.S);
             RenderAll();
             // Окно спрятано — о готовой установке скажет уведомление Windows
-            if (c.S.Error == null && c.S.Installed) Notify(app.Name.ToLowerInvariant() + ".txt установлено", "Открыть можно из core.txt или из меню «Пуск»");
-            else if (c.S.Error != null) Notify("Не удалось установить " + app.Name.ToLowerInvariant() + ".txt", c.S.Error);
+            if (c.S.Error == null && c.S.Installed) Notify(app.Name.ToLowerInvariant() + ".txt установлено", "Открыть можно из core.txt или из меню «Пуск»", "apps");
+            else if (c.S.Error != null) Notify("Не удалось установить " + app.Name.ToLowerInvariant() + ".txt", c.S.Error, "apps");
         }
 
-        // Уведомление Windows — только когда окна core.txt не видно: при открытом окне всё и так на экране
-        internal void Notify(string title, string text)
+        // Уведомление — только когда окна core.txt не видно: при открытом окне всё и так на экране.
+        // Есть остров kapsula.txt — карточка на нём; острова нет — уведомление Windows, но не при «Не беспокоить»
+        // и не поверх игры (CoreFamily.NotifyRoute). Щелчок по карточке или уведомлению открывает страницу openPage
+        // (null — просто окно). false — ничего не показано.
+        internal bool Notify(string title, string text, string openPage)
         {
-            if (tray == null || DemoMode || IsVisible && IsActive) return;
-            try { tray.ShowBalloonTip(6000, title, text, System.Windows.Forms.ToolTipIcon.None); } catch { }
+            if (DemoMode || IsVisible && IsActive) return false;
+            string route = CoreFamily.NotifyRoute(hub != null && AppHas("kapsula", Family.NotifyCommand), tray != null, family.Focus, family.Game);
+            if (route == null) return false;
+            if (route == "island")
+                SendCommand("kapsula", Family.NotifyCommand, Hub.Msg("title", CoreFamily.Cut(title, 60), "text", CoreFamily.Cut(text, 200), "open", true), false);
+            else
+            {
+                try { tray.ShowBalloonTip(6000, title, text, System.Windows.Forms.ToolTipIcon.None); }
+                catch { return false; }
+            }
+            noticePage = openPage;
+            noticeAt = DateTime.UtcNow;
+            return true;
+        }
+
+        // Щелчок по уведомлению Windows: окно и страница, о которой оно было
+        void OpenNotice()
+        {
+            ShowWindow();
+            string key = TakeNoticePage();
+            if (key != null && page != PWelcome && key != CurrentKey) Go(key);
         }
 
         internal void InstallId(string id) { Card c = Find(id); if (c != null) Install(c); }
@@ -864,6 +1063,77 @@ namespace DevTxt.Core
             States["dock.settings"] = Json.Parse(@"{""groups"":[{""title"":""Панель задач"",""items"":[{""key"":""bar"",""type"":""choice"",""label"":""Внизу экрана"",""hint"":""dock.txt — панель задач Windows прячется. Компактная панель Windows — тонкая полоса с часами"",""value"":""dock"",""options"":[{""value"":""dock"",""label"":""dock.txt""},{""value"":""modern"",""label"":""Компактная панель Windows""},{""value"":""both"",""label"":""dock.txt и панель Windows""}]},{""key"":""winKey"",""type"":""switch"",""label"":""Кнопка Windows открывает меню дока"",""hint"":""Вместо «Пуска» — меню приложений dock.txt. Сочетания вроде Win+E работают как обычно"",""value"":true}]}]}");
             States["smena.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""replace"",""type"":""switch"",""label"":""Заменять Alt+Tab"",""hint"":""Вместо системного переключателя окон открывается этот"",""value"":true}]}]}");
             States["aura.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""power"",""type"":""switch"",""label"":""Обработка голоса"",""hint"":""Включает и выключает aura.txt"",""value"":true},{""key"":""preset"",""type"":""choice"",""label"":""Готовый звук"",""value"":""studio"",""options"":[{""value"":""auto"",""label"":""Под вас""},{""value"":""studio"",""label"":""Подкаст""},{""value"":""radio"",""label"":""Эфир""},{""value"":""crystal"",""label"":""Стрим""},{""value"":""velvet"",""label"":""Бархат""},{""value"":""cinema"",""label"":""Кино""},{""value"":""whisper"",""label"":""Чистый""},{""value"":""custom"",""label"":""Свой""}]},{""key"":""mute"",""type"":""switch"",""label"":""Заглушить микрофон"",""hint"":""Тишина для всех программ"",""value"":false},{""key"":""auto"",""type"":""switch"",""label"":""Авто-уровень"",""hint"":""Выравнивает громкость, вытягивает тихий микрофон"",""value"":true},{""key"":""monitor"",""type"":""switch"",""label"":""Слышать себя"",""hint"":""Только в наушниках, иначе будет эхо"",""value"":false}]},{""title"":""Звук"",""items"":[{""key"":""nsEngine"",""type"":""choice"",""label"":""Шумодав"",""value"":""0"",""options"":[{""value"":""0"",""label"":""Обычный""},{""value"":""1"",""label"":""Жёсткий""}]},{""key"":""loudTarget"",""type"":""choice"",""label"":""Громкость на выходе"",""value"":""0"",""options"":[{""value"":""0"",""label"":""Не выравнивать""},{""value"":""-18"",""label"":""−18 LUFS""},{""value"":""-16"",""label"":""−16 LUFS""},{""value"":""-14"",""label"":""−14 LUFS""}]},{""key"":""dehum"",""type"":""switch"",""label"":""Убрать гул сети"",""hint"":""Вырезает 50 Гц и его гармоники — гудение от розетки и плохой земли"",""value"":false}]}]}");
+            DemoFamily();
+            // Сценарии — по выдуманным состояниям: игра впереди, значит, «Во время игры прятать остров» действует.
+            // Хаба в демо нет, поэтому команды никуда не уходят.
+            scenarios.Update();
+        }
+
+        // Семья на снимках: быстрые действия для общего меню, горячие клавиши (одно совпадение — нарочно),
+        // пункты настроек с полем section, кто что умеет и core.family с выдуманной игрой
+        void DemoFamily()
+        {
+            connectedApps.Add("smena"); connectedApps.Add("dock"); connectedApps.Add("metla");
+            // metla.txt на связи — значит, стоит и запущена (снимки установщика оставляем как были)
+            if (Environment.GetEnvironmentVariable("CORE_DEMO_STEP") == null)
+                foreach (var c in Cards) if (c.App.Id == "metla") { c.S.Path = "demo"; c.S.Version = new Version(0, 1, 0); c.S.Running = true; }
+            States["hub.apps"] = Json.ParseAny(@"[{""app"":""core"",""commands"":[""show"",""focus.set""]},{""app"":""kapsula"",""commands"":[""settings.set"",""show"",""tray.run"",""notify""]},{""app"":""aura"",""commands"":[""settings.set"",""show"",""tray.run""]},{""app"":""dock"",""commands"":[""settings.set"",""tray.run""]},{""app"":""smena"",""commands"":[""settings.set"",""show"",""tray.run""]},{""app"":""metla"",""commands"":[""settings.set"",""show"",""tray.run""]}]");
+            // «Не беспокоить» примерно на полтора часа, до ровных получаса, и игра впереди
+            State.Focus = true;
+            DateTime soon = DateTime.Now.AddMinutes(90);
+            DateTime end = soon.Date.AddHours(soon.Hour).AddMinutes(soon.Minute < 30 ? 0 : 30);
+            State.FocusUntil = (long)(end.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+            family = CoreFamily.Make(State.FamilyTray, true, State.Focus, State.FocusUntil, true, "cs2");
+            States[CoreFamily.Topic] = family.ToData();
+            if (Environment.GetEnvironmentVariable("CORE_DEMO_EMPTY") != null) return;   // снимок пустых «Игр», «Клавиш» и меню: приложения ещё ничего не прислали
+
+            // Пункты трея — те, что приложения присылают на самом деле (kapsula: CoreHub.TrayItems, dock: FamilyRules.Tray)
+            States["kapsula.tray"] = Json.Parse(@"{""items"":[{""key"":""show"",""label"":""Настройки""},{""key"":""awake"",""label"":""Не засыпать"",""check"":false},{""key"":""lyrics"",""label"":""Тексты песен"",""check"":true},{""key"":""shots"",""label"":""Папка со снимками""}]}");
+            States["aura.tray"] = Json.Parse(@"{""items"":[{""key"":""show"",""label"":""Открыть""},{""key"":""power"",""label"":""Обработка голоса"",""check"":true},{""key"":""mute"",""label"":""Заглушить микрофон"",""check"":false}]}");
+            States["dock.tray"] = Json.Parse(@"{""items"":[{""key"":""autoHide"",""label"":""Автоскрытие"",""check"":false},{""key"":""settings"",""label"":""Настройки""}]}");
+            States["smena.tray"] = Json.Parse(@"{""items"":[{""key"":""show"",""label"":""Открыть""},{""key"":""pause"",""label"":""Приостановить"",""check"":false}]}");
+            States["metla.tray"] = Json.Parse(@"{""items"":[{""key"":""show"",""label"":""Открыть""},{""key"":""scan"",""label"":""Проверить диск""}]}");
+            // Сочетания — часть того, что приложения присылают на самом деле (выключенное kapsula.txt шлёт пустым);
+            // «Заглушить микрофон» в aura.txt нарочно совпадает с «Диктовкой», чтобы было видно предупреждение
+            States["kapsula.keys"] = Json.Parse(@"{""keys"":[{""id"":""cmd"",""label"":""Строка команд"",""keys"":""Alt+Space"",""on"":true},{""id"":""area"",""label"":""Снимок области с разметкой"",""keys"":""Ctrl+Alt+S"",""on"":true},{""id"":""full"",""label"":""Снимок всего экрана"",""keys"":""Ctrl+Alt+Shift+S"",""on"":true},{""id"":""dictate"",""label"":""Диктовка"",""keys"":""Ctrl+Alt+D"",""on"":true},{""id"":""rec"",""label"":""Запись экрана"",""keys"":"""",""on"":false}]}");
+            States["aura.keys"] = Json.Parse(@"{""keys"":[{""id"":""power"",""label"":""Обработка голоса"",""keys"":""Ctrl+Shift+F9"",""on"":true},{""id"":""mute"",""label"":""Заглушить микрофон"",""keys"":""Ctrl+Alt+D"",""on"":true}]}");
+            States["dock.keys"] = Json.Parse(@"{""keys"":[{""id"":""winKey"",""label"":""Меню приложений"",""keys"":""Win"",""on"":true}]}");
+            States["smena.keys"] = Json.Parse(@"{""keys"":[{""id"":""switch"",""label"":""Переключение окон"",""keys"":""Alt+Tab"",""on"":true},{""id"":""sameApp"",""label"":""Окна того же приложения"",""keys"":""Alt+`"",""on"":true}]}");
+            States["metla.settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""remind"",""type"":""switch"",""label"":""Напоминать, когда можно освободить больше 5 ГБ"",""hint"":""metla.txt остаётся в трее и раз в день сама проверяет диск. Удаляете всё равно только вы"",""value"":true}]}]}");
+            // Пункты с полем section — те же, что присылают kapsula.txt (CoreHub.SectionOf), aura.txt (hubSettingsNow)
+            // и smena.txt (AppHub): core.txt показывает их на «Играх» и в «Общих», а не на странице приложения
+            DemoItems("kapsula", "Игры",
+                @"{""key"":""showInGames"",""type"":""switch"",""label"":""Показывать остров в играх"",""hint"":""Остров остаётся на месте поверх игр и видео на весь экран, а не прячется за край"",""value"":false,""section"":""games""}",
+                @"{""key"":""fsTrack"",""type"":""switch"",""label"":""Новый трек поверх игр и видео"",""hint"":""Спрятанный от игры остров выглядывает на пару секунд с названием нового трека"",""value"":true,""section"":""games""}",
+                @"{""key"":""gameLoad"",""type"":""switch"",""label"":""Нагрузка в капсуле во время игры"",""hint"":""Пока остров показан поверх игры, капсула вместо часов показывает процессор, видеокарту и память"",""value"":false,""section"":""games""}");
+            DemoItems("kapsula", "Связь с другими приложениями",
+                @"{""key"":""share"",""type"":""switch"",""label"":""Делиться с приложениями dev.txt"",""hint"":""Трек, погода и сегодняшние события — только название и время; непрочитанное в Discord и Steam — только числа. Дальше этого компьютера не уходит"",""value"":true,""section"":""family""}");
+            DemoItems("kapsula", "Запуск и обновления",
+                @"{""key"":""autostart"",""type"":""switch"",""label"":""Запускать вместе с Windows"",""value"":true,""section"":""startup""}",
+                @"{""key"":""autoUpdate"",""type"":""switch"",""label"":""Автообновление"",""hint"":""kapsula.txt сама скачивает новые версии с GitHub и сверяет контрольную сумму файла"",""value"":true,""section"":""startup""}");
+            DemoItems("aura", "Запуск и обновления",
+                @"{""key"":""autostart"",""type"":""switch"",""label"":""Запускать вместе с Windows"",""hint"":""aura.txt открывается свёрнутой в трей, обработка голоса работает сразу"",""value"":true,""section"":""startup""}",
+                @"{""key"":""autoUpdate"",""type"":""switch"",""label"":""Проверять обновления"",""hint"":""При запуске спрашивает у GitHub, вышла ли новая версия. Устанавливается только по вашему нажатию"",""value"":true,""section"":""startup""}");
+            DemoItems("smena", "",
+                @"{""key"":""games"",""type"":""switch"",""label"":""Не вмешиваться в играх"",""hint"":""Когда впереди игра или другое окно на весь экран, работает обычный Alt+Tab"",""value"":true,""section"":""games""}");
+            // Снимок страницы приложения, у которого все настройки переехали на общие страницы
+            string moved = Environment.GetEnvironmentVariable("CORE_DEMO_MOVED");
+            if (moved != null && States.ContainsKey(moved + ".settings"))
+                States[moved + ".settings"] = Json.Parse(@"{""groups"":[{""title"":"""",""items"":[{""key"":""autostart"",""type"":""switch"",""label"":""Запускать вместе с Windows"",""value"":true,""section"":""startup""}]}]}");
+        }
+
+        // Добавляет к выдуманным настройкам приложения ещё одну группу пунктов
+        void DemoItems(string app, string title, params string[] items)
+        {
+            object now;
+            var settings = States.TryGetValue(app + ".settings", out now) ? now as Dictionary<string, object> : null;
+            if (settings == null) return;
+            var groups = new List<object>();
+            foreach (object g in Json.List(settings, "groups")) groups.Add(g);
+            var group = Json.Parse(@"{""items"":[" + string.Join(",", items) + "]}");
+            group["title"] = title;
+            groups.Add(group);
+            settings["groups"] = groups.ToArray();
         }
 
         // Рисует окно в файл PNG, не показывая его на экране. scroll — на сколько прокрутить открытую страницу.
@@ -938,6 +1208,24 @@ namespace DevTxt.Core
             timer.Start();
         }
 
+        // Снимок общего меню значка в трее — те же пункты, что по правому щелчку, только без окна на экране
+        public void MenuShot(string file)
+        {
+            var menu = new PopMenu();
+            FillTrayMenu(menu);
+            var box = (FrameworkElement)menu.Content;
+            menu.Content = null;
+            var stage = new Border { Background = Ui.Bg, Padding = new Thickness(12), Child = box };
+            stage.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            stage.Arrange(new Rect(stage.DesiredSize));
+            stage.UpdateLayout();
+            var bmp = new RenderTargetBitmap((int)Math.Ceiling(stage.ActualWidth * 1.5), (int)Math.Ceiling(stage.ActualHeight * 1.5), 144, 144, PixelFormats.Pbgra32);
+            bmp.Render(stage);
+            var enc = new PngBitmapEncoder();
+            enc.Frames.Add(BitmapFrame.Create(bmp));
+            using (var f = System.IO.File.Create(file)) enc.Save(f);
+        }
+
         public void Shot(string file, double scroll)
         {
             var root = (FrameworkElement)Content;
@@ -947,6 +1235,10 @@ namespace DevTxt.Core
             root.UpdateLayout();
             RenderAll();
             root.UpdateLayout();
+            // Снимок раздела, открытого «для приложения»: прокрутка к его пунктам, как по команде show от него
+            string reveal = DemoMode && page == PSettings ? Environment.GetEnvironmentVariable("CORE_DEMO_REVEAL") : null;
+            double? at = reveal != null ? settings.OffsetOf(reveal) : null;
+            if (at.HasValue) scroll = at.Value;
             if (scroll > 0)
             {
                 ScrollViewer view = page == PSettings ? settings.Root : page == PScenarios ? scenariosPage.Root : page == PWelcome ? welcome.Root : appsView;

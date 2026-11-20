@@ -1,4 +1,5 @@
 // core.txt. Pages.cs — общие кирпичики страниц и две страницы: «Сценарии» и первый запуск.
+// Сценарии про игры живут на странице «Игры» (SettingsPage.cs) — теми же строками, что здесь.
 using System;
 using System.Collections.Generic;
 using System.Windows;
@@ -75,6 +76,88 @@ namespace DevTxt.Core
             return new RowRef { Root = row, Text = text, Label = name, Hint = h };
         }
 
+        // Заголовок группы одного приложения: значок, название и, если нужно, кнопка справа. Высота одна — с кнопкой
+        // и без: строки под заголовками стоят на одинаковом расстоянии.
+        protected void AppHeader(AppEntry app, string name, FrameworkElement right)
+        {
+            var panel = target ?? stack;
+            var line = new DockPanel { LastChildFill = true, MinHeight = 32, Margin = new Thickness(4, panel.Children.Count == 0 ? 0 : 14, 0, 8) };
+            if (right != null)
+            {
+                right.VerticalAlignment = VerticalAlignment.Center;
+                DockPanel.SetDock(right, Dock.Right);
+                line.Children.Add(right);
+            }
+            var title = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            if (app != null && app.Sprite != null)
+            {
+                var s = Ui.Sprite(app.Sprite, 16);
+                s.Margin = new Thickness(0, 0, 8, 0); s.VerticalAlignment = VerticalAlignment.Center;
+                title.Children.Add(s);
+            }
+            var t = Ui.T(name, Tokens.Size.Heading, Ui.Label2, FontWeights.SemiBold);
+            t.VerticalAlignment = VerticalAlignment.Center;
+            title.Children.Add(t);
+            line.Children.Add(title);
+            panel.Children.Add(line);
+        }
+
+        // Подпись внутри группы: чьи строки идут ниже — значок и название приложения, как подпись приложения в меню
+        // значка в трее. Нужна там, где в одной группе строки разных приложений («Запуск и обновления»).
+        protected FrameworkElement Owner(AppEntry app, string name)
+        {
+            var caption = Owner(app != null ? app.Sprite : null, name);
+            if (app != null) Owned(app.Id, caption);
+            return caption;
+        }
+
+        protected FrameworkElement Owner(string[] sprite, string name)
+        {
+            var panel = target ?? stack;
+            // Сразу под заголовком группы — вплотную, между строками разных приложений — с отступом
+            bool afterTitle = panel.Children.Count == 0 || panel.Children[panel.Children.Count - 1] is TextBlock;
+            var line = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(4, afterTitle ? 0 : 6, 0, 6) };
+            if (sprite != null)
+            {
+                var s = Ui.Sprite(sprite, 14);
+                s.Margin = new Thickness(0, 0, 6, 0); s.VerticalAlignment = VerticalAlignment.Center;
+                line.Children.Add(s);
+            }
+            var t = Ui.T(name, Tokens.Size.Caption, Ui.Label3, FontWeights.SemiBold);
+            t.VerticalAlignment = VerticalAlignment.Center;
+            line.Children.Add(t);
+            panel.Children.Add(line);
+            return line;
+        }
+
+        // На странице появилась подпись приложения appId — страница может запомнить её, чтобы потом прокрутить к ней
+        protected virtual void Owned(string appId, FrameworkElement caption) { }
+
+        // Строка сценария: переключатель и записка под ним — действует ли он и чего ему не хватает.
+        // Возвращает, чем её обновить по нынешнему положению дел.
+        protected Action ScenarioRow(Scenario s)
+        {
+            var scenario = s;
+            var sw = new Switch(State.Scenarios.Contains(s.Id), delegate(bool on) { w.SetScenario(scenario.Id, on); });
+            var row = Row(s.Title, s.Hint, sw.Root);
+            var note = new Status();
+            note.Root.Margin = new Thickness(0, 5, 0, 0); note.Root.HorizontalAlignment = HorizontalAlignment.Left; note.Root.Visibility = Visibility.Collapsed;
+            row.Text.Children.Add(note.Root);
+            Action paint = delegate
+            {
+                var missing = new List<string>();
+                foreach (string id in scenario.Needs) if (!w.Connected(id)) missing.Add(Names(new string[] { id }));
+                bool enabled = State.Scenarios.Contains(scenario.Id);
+                Status.Kind kind;
+                string text = ScenariosPage.Note(enabled, w.ScenarioActive(scenario.Id), missing.ToArray(), out kind);
+                sw.Value = enabled;
+                if (text != null) note.Set(text, kind);
+                Motion.Show(note.Root, text != null);
+            };
+            paint();
+            return paint;
+        }
+
         // Шапка раздела приложения: значок и название с подписью
         protected void AppTitle(Card c)
         {
@@ -144,13 +227,14 @@ namespace DevTxt.Core
     }
 
     // «Сценарии»: готовые правила, по которым приложения реагируют друг на друга. Каждое включается переключателем.
+    // Сценарии про игры — на странице «Игры».
     class ScenariosPage : Page
     {
         public ScenariosPage(MainWindow w) : base(w) { }
 
         // Строки собираются один раз и дальше меняются на месте: переключатель доезжает, фокус с клавиатуры не теряется
-        readonly List<Switch> switches = new List<Switch>();
-        readonly List<Status> notes = new List<Status>();
+        readonly List<Action> rows = new List<Action>();
+        bool built;
 
         // Что сказать под сценарием: действует, не работает (включён, а приложений нет) или просто чего не хватает.
         // missing — названия неподключённых приложений; null — сказать нечего.
@@ -166,30 +250,17 @@ namespace DevTxt.Core
 
         public void Render()
         {
-            if (switches.Count == 0)
-                foreach (var s in Scenarios.All)
-                {
-                    var scenario = s;
-                    var sw = new Switch(State.Scenarios.Contains(s.Id), delegate(bool on) { w.SetScenario(scenario.Id, on); });
-                    var row = Row(s.Title, s.Hint, sw.Root);
-                    var note = new Status();
-                    note.Root.Margin = new Thickness(0, 5, 0, 0); note.Root.HorizontalAlignment = HorizontalAlignment.Left; note.Root.Visibility = Visibility.Collapsed;
-                    row.Text.Children.Add(note.Root);
-                    switches.Add(sw); notes.Add(note);
-                }
-
-            for (int i = 0; i < Scenarios.All.Length; i++)
+            if (!built)
             {
-                var s = Scenarios.All[i];
-                var missing = new List<string>();
-                foreach (string id in s.Needs) if (!w.Connected(id)) missing.Add(Names(new string[] { id }));
-                bool enabled = State.Scenarios.Contains(s.Id);
-                Status.Kind kind;
-                string text = Note(enabled, w.ScenarioActive(s.Id), missing.ToArray(), out kind);
-                switches[i].Value = enabled;
-                if (text != null) notes[i].Set(text, kind);
-                Motion.Show(notes[i].Root, text != null);
+                built = true;
+                foreach (var s in Scenarios.All) if (!s.Game) rows.Add(ScenarioRow(s));
+                // Сценарии про игры живут на «Играх» — отсюда туда ведёт одна строка
+                var games = new Btn();
+                games.Set("Открыть «Игры»", null, true, delegate { w.Go("games"); });
+                Row("Сценарии про игры — в разделе «Игры»", "Рядом с тем, что каждое приложение делает, пока впереди игра", games.Root);
+                return;
             }
+            foreach (var paint in rows) paint();
         }
     }
 

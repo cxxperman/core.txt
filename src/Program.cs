@@ -370,6 +370,9 @@ namespace DevTxt.Core
                 Check(Releases.Megabytes(5, 0) == "" && Releases.Megabytes(999 * mb, 20 * mb) == "20 из 20 МБ", "progress never runs past the total");
 
                 Check(Errors.Short(new WebException("The remote name could not be resolved")) == Errors.Offline, "no network is said in Russian");
+                var resetUtc = GitHubLimit.Until("1795134000", DateTime.UtcNow);
+                Check(resetUtc == new DateTime(2026, 11, 20, 0, 20, 0, DateTimeKind.Utc) && GitHubLimit.Until("x", new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc)) == new DateTime(2026, 1, 1, 1, 0, 0, DateTimeKind.Utc), "GitHub limit reset time is read from the header, an hour if missing");
+                Check(Errors.Short(new GitHubLimit(resetUtc)) == Errors.Limit(resetUtc.ToLocalTime()) && Errors.Limit(new DateTime(2026, 1, 1, 18, 37, 0)) == "GitHub временно ограничил проверки — попробуйте после 18:37", "a GitHub request limit is not called a network problem");
                 Check(Errors.Short(new System.IO.IOException("The process cannot access the file", unchecked((int)0x80070020))) == Errors.Busy, "a locked file asks to close the app");
                 Check(Errors.Short(new System.IO.IOException("read failed", new System.Net.Sockets.SocketException(10054))) == Errors.Offline, "a dropped download is a network problem");
                 Check(Errors.Short(new UnauthorizedAccessException("Access to the path is denied.")) == Errors.Denied, "no access to the folder is said in Russian");

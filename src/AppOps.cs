@@ -36,6 +36,9 @@ namespace DevTxt.Core
     static class Errors
     {
         public const string Offline = "Нет связи с GitHub — проверьте интернет";
+
+        // GitHub временно не отвечает на проверки с этого компьютера (60 запросов в час без входа в аккаунт)
+        public static string Limit(DateTime resetLocal) { return "GitHub временно ограничил проверки — попробуйте после " + resetLocal.ToString("HH:mm"); }
         public const string Busy = "Файл занят — закройте приложение";
         public const string Denied = "Нет доступа к папке";
         public const string Checksum = "Контрольная сумма не совпала";
@@ -51,6 +54,7 @@ namespace DevTxt.Core
         public static string Short(Exception e)
         {
             if (e == null) return Unknown;
+            if (e is GitHubLimit) return e.Message;   // связь есть, GitHub просит подождать
             // Свои сообщения уже написаны по-русски и для человека
             if (Russian(e.Message) && e.GetType() == typeof(Exception)) return e.Message.IndexOf("онтрольная сумма", StringComparison.Ordinal) >= 0 ? Checksum : e.Message;
             for (Exception x = e; x != null; x = x.InnerException)

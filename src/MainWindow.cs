@@ -862,6 +862,7 @@ namespace DevTxt.Core
             RenderAll();
             bool any = false;
             int asked = 0, lost = 0;   // сколько раз спросили GitHub и сколько раз он не ответил
+            GitHubLimit limit = null;   // GitHub ответил «хватит на этот час» — дело не в связи
             if (await Task.Run(delegate { return Catalog.Refresh(); })) MergeCards();   // каталог изменился: идущие установки при этом не теряются
             foreach (var c in Cards.ToArray())
             {
@@ -875,17 +876,19 @@ namespace DevTxt.Core
                     if (r != null) { State.Latest[app.Id] = r; c.S.Latest = r; any = true; }
                     if (c.S.Phase == Phase.Idle) c.S.Clear();
                 }
-                catch
+                catch (Exception e)
                 {
                     lost++;
-                    if (c.S.Phase == Phase.Idle && c.S.Latest == null && !app.Soon) { c.S.Error = "Не удалось узнать последнюю версию: нет связи с GitHub"; c.S.ErrorDetail = null; }
+                    if (e is GitHubLimit) limit = (GitHubLimit)e;
+                    if (c.S.Phase == Phase.Idle && c.S.Latest == null && !app.Soon) { c.S.Error = e is GitHubLimit ? e.Message : "Не удалось узнать последнюю версию: нет связи с GitHub"; c.S.ErrorDetail = null; }
                 }
             }
             // И сам core.txt: его релизов может ещё не быть — тогда просто ничего не предлагаем
             asked++;
-            try { SelfUpdate.Latest = await Task.Run(delegate { return Releases.Latest(SelfUpdate.Entry); }); } catch { lost++; }
+            try { SelfUpdate.Latest = await Task.Run(delegate { return Releases.Latest(SelfUpdate.Entry); }); } catch (Exception e) { lost++; if (e is GitHubLimit) limit = (GitHubLimit)e; }
             if (any) { State.Checked = DateTime.UtcNow; State.Save(); }
-            if (AllLost(asked, lost)) Say(Errors.Offline, (string)null);   // не ответил никто — дело в связи, а не в приложениях
+            if (limit != null) Say(limit.Message, (string)null);   // связь есть, GitHub просит подождать
+            else if (AllLost(asked, lost)) Say(Errors.Offline, (string)null);   // не ответил никто — дело в связи, а не в приложениях
             checking = false;
             RenderAll();
             int updates = Cards.FindAll(delegate(Card c) { return c.S.UpdateAvailable; }).Count + (SelfUpdate.Available ? 1 : 0);

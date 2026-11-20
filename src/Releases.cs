@@ -48,8 +48,19 @@ namespace DevTxt.Core
 
         public static string GetText(string url)
         {
-            using (var rs = Request(url).GetResponse())
-            using (var r = new StreamReader(rs.GetResponseStream(), Encoding.UTF8)) return r.ReadToEnd();
+            try
+            {
+                using (var rs = Request(url).GetResponse())
+                using (var r = new StreamReader(rs.GetResponseStream(), Encoding.UTF8)) return r.ReadToEnd();
+            }
+            catch (WebException e)
+            {
+                // GitHub без входа в аккаунт отвечает на 60 запросов в час с одного компьютера; дальше — 403 или 429
+                var http = e.Response as HttpWebResponse;
+                if (http != null && ((int)http.StatusCode == 403 || (int)http.StatusCode == 429) && http.Headers["X-RateLimit-Remaining"] == "0")
+                    throw new GitHubLimit(GitHubLimit.Until(http.Headers["X-RateLimit-Reset"], DateTime.UtcNow));
+                throw;
+            }
         }
 
         public static bool AssetMatches(string pattern, string name)
@@ -153,5 +164,20 @@ namespace DevTxt.Core
         }
 
         public static void TryDelete(string file) { try { if (File.Exists(file)) File.Delete(file); } catch { } }
+    }
+
+    // GitHub исчерпал запросы для этого компьютера: связь есть, просто надо подождать до Reset (UTC)
+    class GitHubLimit : Exception
+    {
+        public readonly DateTime Reset;
+        public GitHubLimit(DateTime reset) : base(Errors.Limit(reset.ToLocalTime())) { Reset = reset; }
+
+        // Заголовок X-RateLimit-Reset — секунды с 1970 года; не разобрать — через час
+        public static DateTime Until(string header, DateTime nowUtc)
+        {
+            long sec;
+            if (long.TryParse(header, out sec) && sec > 0) return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(sec);
+            return nowUtc.AddHours(1);
+        }
     }
 }

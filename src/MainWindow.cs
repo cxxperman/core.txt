@@ -810,6 +810,12 @@ namespace DevTxt.Core
                         string app = g.App, key = t.Key;
                         menu.Item(t.Label, t.Check == true, t.Enabled ? (Action)delegate { RunTray(app, key); } : null);
                     }
+                    // Своего значка у приложения сейчас нет — закрыть его можно только отсюда
+                    if (CoreFamily.Has(StateOf("hub.apps"), g.App, Family.QuitCommand) || DemoMode)
+                    {
+                        string who = g.App;
+                        menu.Item("Закрыть", false, delegate { SendCommand(who, Family.QuitCommand, new Dictionary<string, object>(), false); });
+                    }
                 }
                 if (groups.Count > 0) menu.Line();
             }

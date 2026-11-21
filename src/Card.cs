@@ -295,8 +295,8 @@ namespace DevTxt.Core
                 if (busy && !wasBusy) Motion.Breathe(tile, true);
                 else if (!busy && wasBusy)
                 {
-                    if (error != null) Motion.Breathe(tile, false);
-                    else { Motion.Pop(tile); Motion.Glow(Root, S.Installed ? App.Color : (Ui.Light ? Tokens.Light.Label3 : Tokens.Dark.Label3)); }   // audit:ok — цвет выбран по теме
+                    Motion.Breathe(tile, false);   // работа кончилась — значок перестаёт «дышать», и после удачи тоже
+                    if (error == null) { Motion.Pop(tile); Motion.Glow(Root, S.Installed ? App.Color : (Ui.Light ? Tokens.Light.Label3 : Tokens.Dark.Label3)); }   // audit:ok — цвет выбран по теме
                 }
                 if (error != null && error != wasError) Motion.Shake(Root);
                 else if (!busy && !wasBusy && S.Installed != wasInstalled) Motion.Pop(tile);

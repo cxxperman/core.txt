@@ -27,6 +27,9 @@ namespace DevTxt.Core
         public bool Lost;
         public string Note;
 
+        // Сколько раз к карточке применяли проверку: фоновая проверка, начатая раньше последней, своё не кладёт
+        public int Checks;
+
         public bool Launching { get { return !Running && LaunchUntil > DateTime.UtcNow; } }
         public void Fail(Exception e) { Error = Errors.Short(e); ErrorDetail = Errors.Detail(e); }
         public void Fail(string prefix, Exception e) { Error = prefix + ": " + Errors.Lower(Errors.Short(e)); ErrorDetail = Errors.Detail(e); }
@@ -34,6 +37,106 @@ namespace DevTxt.Core
 
         public bool Installed { get { return Path != null; } }
         public bool UpdateAvailable { get { return Installed && Version != null && Latest != null && Latest.Version > Version; } }
+    }
+
+    // То из состояния, что меняет проверка: окно перерисовывается, только если это действительно поменялось
+    class Seen
+    {
+        string path;
+        Version version;
+        bool running, lost;
+        Release latest;
+
+        public static Seen Of(AppStatus s) { return new Seen { path = s.Path, version = s.Version, running = s.Running, lost = s.Lost, latest = s.Latest }; }
+
+        public bool Same(Seen o)
+        {
+            return o != null && string.Equals(path, o.path, StringComparison.OrdinalIgnoreCase) && Equals(version, o.version) && running == o.running && lost == o.lost
+                && (latest == o.latest || latest != null && o.latest != null && latest.Version == o.latest.Version && latest.Url == o.latest.Url);
+        }
+    }
+
+    // Что проверка нашла на диске и среди процессов. Считается в фоне и сама ничего не записывает: применяет
+    // найденное к карточке и к State окно (AppOps.Apply) — State не потокобезопасен.
+    class Probe
+    {
+        public string Path;
+        public Version Version;
+        public bool Running, Lost;
+        public bool Procs;       // на процессы смотрели; нет — Running остаётся как был
+        public string Saved;     // какой запомненный путь видела проверка
+        public bool DropSaved;   // запомненный путь — во временной папке: забыть
+    }
+
+    // Снимок процессов на один проход: система обходится один раз, а не по разу на каждое приложение и каждое имя
+    // Discord. Путь к файлу — через QueryFullProcessImageName: Process.MainModule у завершившегося, но ещё не
+    // убранного системой процесса думает до секунды (на этой машине восемь таких Smena держали окно по шесть секунд)
+    class ProcSnap
+    {
+        readonly Dictionary<string, List<string>> byName = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr OpenProcess(int access, bool inherit, int pid);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        static extern bool QueryFullProcessImageName(IntPtr process, int flags, System.Text.StringBuilder name, ref int size);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern bool CloseHandle(IntPtr handle);
+
+        // names — какие процессы нужны (имя без .exe); у остальных путь даже не спрашиваем
+        public static ProcSnap Take(ICollection<string> names)
+        {
+            var snap = new ProcSnap();
+            var wanted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string n in names) if (!string.IsNullOrEmpty(n)) wanted.Add(n);
+            if (wanted.Count == 0) return snap;
+            Process[] all;
+            try { all = Process.GetProcesses(); } catch { return snap; }
+            foreach (var p in all)
+            {
+                try
+                {
+                    string name = p.ProcessName;
+                    if (!wanted.Contains(name)) continue;
+                    if (p.Threads.Count == 0) continue;   // процесс уже завершился, его просто ещё держат
+                    bool gone;
+                    string path = ImagePath(p.Id, out gone);
+                    if (gone) continue;
+                    List<string> list;
+                    if (!snap.byName.TryGetValue(name, out list)) snap.byName[name] = list = new List<string>();
+                    list.Add(path);
+                }
+                catch { }
+                finally { p.Dispose(); }
+            }
+            return snap;
+        }
+
+        // Путь к файлу процесса; null — не узнать (защищённый процесс). gone — процесс уже завершился
+        static string ImagePath(int pid, out bool gone)
+        {
+            gone = false;
+            IntPtr h = OpenProcess(0x1000 | 0x00100000, false, pid);   // PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+            if (h == IntPtr.Zero) return null;
+            try
+            {
+                if (WaitForSingleObject(h, 0) == 0) { gone = true; return null; }
+                var sb = new System.Text.StringBuilder(1024);
+                int size = sb.Capacity;
+                return QueryFullProcessImageName(h, 0, sb, ref size) ? sb.ToString(0, size) : null;
+            }
+            finally { CloseHandle(h); }
+        }
+
+        public bool Has(string name) { return !string.IsNullOrEmpty(name) && byName.ContainsKey(name); }
+
+        // Пути запущенных копий; null в списке — копия есть, а путь не узнать
+        public IList<string> Paths(string name)
+        {
+            List<string> list;
+            return !string.IsNullOrEmpty(name) && byName.TryGetValue(name, out list) ? list : (IList<string>)new string[0];
+        }
     }
 
     // Ошибки для человека: короткая фраза по-русски вместо текста исключения. Сам текст остаётся для подсказки.
@@ -141,14 +244,26 @@ namespace DevTxt.Core
             return full;
         }
 
+        // Длинный вид папки с разделителем на конце. Временная папка и дом спрашиваются у каждого пути при каждой
+        // проверке — их длинный вид запоминается; ключ — сама папка, так что смена TempOverride или HomeOverride
+        // в проверках сразу даёт новый ответ. Пара (папка, ответ) меняется целиком: читают и из фона
+        static string[] tempDir, homeDir;
+        static string DirKey(string dir, ref string[] cache)
+        {
+            string[] c = cache;
+            if (c != null && c[0] == dir) return c[1];
+            string d = LongFull(dir).TrimEnd('\\', '/') + "\\";
+            if (Directory.Exists(dir)) cache = new string[] { dir, d };   // ещё не созданной папке длинного вида не узнать — спросим снова
+            return d;
+        }
+
         // Лежит ли путь внутри папки; граница по разделителю, чтобы «C:\Temp2» не считалась частью «C:\Temp»
-        static bool InsideDir(string path, string dir)
+        static bool InsideDir(string path, string dir, ref string[] cache)
         {
             try
             {
                 if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(dir)) return false;
-                string d = LongFull(dir).TrimEnd('\\', '/') + "\\";
-                return LongFull(path).StartsWith(d, StringComparison.OrdinalIgnoreCase);
+                return LongFull(path).StartsWith(DirKey(dir, ref cache), StringComparison.OrdinalIgnoreCase);
             }
             catch { return false; }
         }
@@ -157,13 +272,13 @@ namespace DevTxt.Core
         // Файл во временной папке — пробная сборка или распакованный архив, а не установленное приложение
         public static bool InTemp(string path)
         {
-            return InsideDir(path, TempOverride ?? System.IO.Path.GetTempPath());
+            return InsideDir(path, TempOverride ?? System.IO.Path.GetTempPath(), ref tempDir);
         }
 
         // Путь годится как место установленного приложения: не во временной папке (если только это не наш общий дом)
         static bool Trusted(string path)
         {
-            return !InTemp(path) || InsideDir(path, Home);
+            return !InTemp(path) || InsideDir(path, Home, ref homeDir);
         }
 
         public static string DefaultPath(AppEntry app)
@@ -427,81 +542,151 @@ namespace DevTxt.Core
             if (wasRunning) { try { Launch(to); } catch { } }
         }
 
-        static string RunningPath(AppEntry app, out bool running)
+        // Среди одноимённых процессов берём тот, чей путь годится; пробная сборка из временной папки не в счёт
+        static string RunningPath(AppEntry app, ProcSnap procs, out bool running)
         {
             running = false;
             if (string.IsNullOrEmpty(app.Process)) return null;
             string found = null;
-            foreach (var p in Process.GetProcessesByName(app.Process))
+            foreach (string f in procs.Paths(app.Process))
             {
                 running = true;
-                // Среди одноимённых процессов берём тот, чей путь годится; пробная сборка из временной папки не в счёт
-                try { if (found == null) { string f = p.MainModule.FileName; if (Trusted(f)) found = f; } } catch { }
-                p.Dispose();
+                if (found == null && f != null && Trusted(f)) found = f;
             }
             return found;
         }
+
+        // Версия из файла программы. Карточки спрашивают каждые несколько секунд — ответ запоминается, пока у файла
+        // те же размер и время изменения
+        static readonly Dictionary<string, object[]> versions = new Dictionary<string, object[]>(StringComparer.OrdinalIgnoreCase);
 
         public static Version FileVersion(string path)
         {
             try
             {
+                var fi = new FileInfo(path);
+                if (!fi.Exists) return null;
+                long length = fi.Length;
+                DateTime time = fi.LastWriteTimeUtc;
+                lock (versions)
+                {
+                    object[] seen;
+                    if (versions.TryGetValue(fi.FullName, out seen) && (long)seen[0] == length && (DateTime)seen[1] == time) return (Version)seen[2];
+                }
                 var info = FileVersionInfo.GetVersionInfo(path);
-                return new Version(info.FileMajorPart, info.FileMinorPart, info.FileBuildPart);
+                var v = new Version(info.FileMajorPart, info.FileMinorPart, info.FileBuildPart);
+                lock (versions) versions[fi.FullName] = new object[] { length, time, v };
+                return v;
             }
             catch { return null; }
         }
 
-        // Смотрит на диск и на список процессов. Сеть не трогает.
-        public static void Refresh(AppEntry app, AppStatus s)
+        // Имена процессов, на которые смотрит проверка этих приложений
+        public static List<string> ProcessNames(IEnumerable<AppEntry> apps)
         {
+            var names = new List<string>();
+            foreach (var app in apps)
+            {
+                if (app.IsConnector) names.AddRange(DiscordInstall.ProcessNames);
+                else if (!string.IsNullOrEmpty(app.Process)) names.Add(app.Process);
+            }
+            return names;
+        }
+
+        // Какой путь программы core.txt помнит. Читать State — только в потоке окна
+        public static string SavedPath(AppEntry app)
+        {
+            string saved;
+            return State.Paths.TryGetValue(app.Id, out saved) ? saved : null;
+        }
+
+        // Смотрит на диск и на список процессов. Сеть не трогает, ничего не записывает — можно звать из фона.
+        // saved — путь из State.Paths, прочитанный в потоке окна; procs == null — на процессы не смотреть (первое,
+        // быстрое состояние при запуске: «запущено» дотянет фоновая проверка)
+        public static Probe Look(AppEntry app, string saved, ProcSnap procs)
+        {
+            var p = new Probe { Procs = procs != null, Saved = saved };
             if (app.IsConnector)
             {
                 // Maska: подключена ли (отметка на месте), цел ли плагин в сборке и запущен ли сейчас Discord
-                s.Path = DiscordInstall.Installed ? DiscordInstall.Marker : null;
-                s.Lost = s.Path != null && !DiscordInstall.PluginInBuild;
-                s.Running = DiscordInstall.Running();
-                return;
+                p.Path = DiscordInstall.Installed ? DiscordInstall.Marker : null;
+                p.Lost = p.Path != null && !DiscordInstall.PluginInBuild;
+                p.Running = procs != null && DiscordInstall.Running(procs);
+                return p;
             }
-            if (app.IsIntegration)
+            if (app.IsIntegration || app.IsBundle)
             {
                 string marker = Expand(app.Marker);
-                s.Path = marker != null && File.Exists(marker) ? marker : null;
-                return;
+                p.Path = marker != null && File.Exists(marker) ? marker : null;
+                // Какую версию набора ставили — записано рядом; набор, поставленный руками, версии не имеет
+                if (app.IsBundle && p.Path != null)
+                    try { Version v; if (Version.TryParse(File.ReadAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(p.Path), VersionFile)).Trim(), out v)) p.Version = v; } catch { }
+                return p;
             }
-            if (app.IsBundle)
-            {
-                string marker = Expand(app.Marker);
-                s.Path = marker != null && File.Exists(marker) ? marker : null;
-                s.Version = null;
-                s.Running = false;
-                if (s.Path != null)
-                {
-                    // Какую версию ставили — записано рядом; набор, поставленный руками, версии не имеет
-                    try { Version v; if (Version.TryParse(File.ReadAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(s.Path), VersionFile)).Trim(), out v)) s.Version = v; } catch { }
-                }
-                Release latest;
-                if (State.Latest.TryGetValue(app.Id, out latest)) s.Latest = latest;
-                return;
-            }
-            bool running;
-            string live = RunningPath(app, out running);
-            s.Running = running;
+            bool running = false;
+            string live = procs != null ? RunningPath(app, procs, out running) : null;
+            p.Running = running;
             // Пробные сборки во временной папке — не установленное приложение: ни запущенную оттуда, ни запомненную раньше не берём
             if (live != null && !Trusted(live)) live = null;
-            string saved;
-            State.Paths.TryGetValue(app.Id, out saved);
-            if (saved != null && !Trusted(saved)) { State.Paths.Remove(app.Id); State.Save(); saved = null; }
+            if (saved != null && !Trusted(saved)) { p.DropSaved = true; saved = null; }
             string auto = AutostartPath(app);
             if (auto != null && !Trusted(auto)) auto = null;
-            string found = null;
             foreach (string c in new string[] { live, saved, DefaultPath(app), auto, LegacyPath(app) })
-                if (!string.IsNullOrEmpty(c) && File.Exists(c)) { found = c; break; }
-            s.Path = found;
-            s.Version = found != null ? FileVersion(found) : null;
-            if (found != null && saved != found) { State.Paths[app.Id] = found; State.Save(); }
-            Release r;
-            if (State.Latest.TryGetValue(app.Id, out r)) s.Latest = r;
+                if (!string.IsNullOrEmpty(c) && File.Exists(c)) { p.Path = c; break; }
+            p.Version = p.Path != null ? FileVersion(p.Path) : null;
+            return p;
+        }
+
+        // Кладёт найденное в карточку и запоминает путь программы. Только в потоке окна. true — видимое поменялось
+        public static bool Apply(AppEntry app, AppStatus s, Probe p)
+        {
+            Seen before = Seen.Of(s);
+            s.Checks++;
+            if (app.IsConnector)
+            {
+                s.Path = p.Path;
+                s.Lost = p.Lost;
+                if (p.Procs) s.Running = p.Running;
+            }
+            else if (app.IsIntegration) s.Path = p.Path;
+            else
+            {
+                s.Path = p.Path;
+                s.Version = p.Version;
+                if (app.IsBundle) s.Running = false;
+                else if (p.Procs) s.Running = p.Running;
+                if (!app.IsBundle)
+                {
+                    // Запомненное меняем, только если с начала проверки его никто не поменял
+                    string now = SavedPath(app);
+                    bool save = false;
+                    if (p.DropSaved && now == p.Saved && now != null) { State.Paths.Remove(app.Id); now = null; save = true; }
+                    if (p.Path != null && now != p.Path && now == (p.DropSaved ? null : p.Saved)) { State.Paths[app.Id] = p.Path; save = true; }
+                    if (save) State.Save();
+                }
+                Release r;
+                if (State.Latest.TryGetValue(app.Id, out r)) s.Latest = r;
+            }
+            return !before.Same(Seen.Of(s));
+        }
+
+        // Сразу и в этом потоке — после действий над приложением и в проверках без окна
+        public static void Refresh(AppEntry app, AppStatus s) { Refresh(app, s, ProcSnap.Take(ProcessNames(new AppEntry[] { app }))); }
+
+        public static void Refresh(AppEntry app, AppStatus s, ProcSnap procs) { Apply(app, s, Look(app, SavedPath(app), procs)); }
+
+        // Проход по всем: один снимок процессов на всех. Вызывается в фоне; saved — пути из State, по порядку apps
+        public static List<Probe> LookAll(IList<AppEntry> apps, IList<string> saved)
+        {
+            var procs = ProcSnap.Take(ProcessNames(apps));
+            var list = new List<Probe>();
+            for (int i = 0; i < apps.Count; i++)
+            {
+                Probe p;
+                try { p = Look(apps[i], saved[i], procs); } catch { p = null; }
+                list.Add(p);
+            }
+            return list;
         }
 
         const string VersionFile = ".core-version";

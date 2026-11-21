@@ -13,6 +13,7 @@
 //   --uninstall имя     удалить приложение без окна; настройки остаются
 //   --install имя       поставить или обновить приложение из каталога без окна и напечатать, чем кончилось
 //   --latest            спросить у GitHub последние версии приложений из каталога и напечатать их
+//   --bench             замерить, сколько стоит проверка приложений (диск и процессы) на этом компьютере
 //   --fetch адрес сумма размер   скачать файл с проверкой размера и SHA-256 (для проверки на своём компьютере)
 using System;
 using System.Net;
@@ -39,6 +40,7 @@ namespace DevTxt.Core
             for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "--shot") shot = args[i + 1];
             if (Array.IndexOf(args, "--selftest") >= 0) return SelfTest.Run();
             if (Array.IndexOf(args, "--latest") >= 0) return SelfTest.Latest();
+            if (Array.IndexOf(args, "--bench") >= 0) return Bench.Run();
             for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "--install") return SelfTest.InstallNow(args[i + 1]);
             for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "--uninstall") return SelfTest.UninstallNow(args[i + 1]);
             for (int i = 0; i + 1 < args.Length; i++)
@@ -393,6 +395,65 @@ namespace DevTxt.Core
                     State.Paths.Remove("selftest-temp");
                     try { System.IO.Directory.Delete(tdir, true); } catch { }
                     try { System.IO.Directory.Delete(thome, true); } catch { }
+                }
+            }
+
+            // Проверка карточек: один снимок процессов вместо обхода на каждое имя, версия файла запоминается,
+            // а окно перерисовывается, только если что-то поменялось
+            {
+                var none = ProcSnap.Take(new string[] { "CoreTxtNoSuchProcess" });
+                Check(!none.Has("CoreTxtNoSuchProcess") && none.Paths("CoreTxtNoSuchProcess").Count == 0 && System.Diagnostics.Process.GetProcessesByName("CoreTxtNoSuchProcess").Length == 0, "the process snapshot agrees with the old lookup for a missing process");
+                using (var me = System.Diagnostics.Process.GetCurrentProcess())
+                {
+                    var mine = ProcSnap.Take(new string[] { me.ProcessName });
+                    string path = me.MainModule.FileName;
+                    Check(mine.Has(me.ProcessName.ToUpperInvariant()) && new System.Collections.Generic.List<string>(mine.Paths(me.ProcessName)).Exists(delegate(string p) { return string.Equals(p, path, StringComparison.OrdinalIgnoreCase); }), "the process snapshot finds a running process and its file, like MainModule");
+                }
+                Check(!ProcSnap.Take(new string[0]).Has("Core") && !DiscordInstall.Running(null), "an empty snapshot has nothing running");
+
+                string vdir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-version-" + System.Diagnostics.Process.GetCurrentProcess().Id);
+                try
+                {
+                    System.IO.Directory.CreateDirectory(vdir);
+                    string exe = System.IO.Path.Combine(vdir, "Copy.exe"), self = typeof(Program).Assembly.Location;
+                    Version mine = typeof(Program).Assembly.GetName().Version;
+                    mine = new Version(mine.Major, mine.Minor, mine.Build);
+                    System.IO.File.Copy(self, exe);
+                    Check(AppOps.FileVersion(exe) == mine && AppOps.FileVersion(exe) == mine, "the file version is read, and read again from memory");
+                    System.IO.File.WriteAllText(exe, "not a program any more");
+                    Check(AppOps.FileVersion(exe) == new Version(0, 0, 0), "a changed file is read anew, not taken from memory");
+                    System.IO.File.Copy(self, exe, true);
+                    Check(AppOps.FileVersion(exe) == mine, "the version comes back with the program");
+                    Check(AppOps.FileVersion(System.IO.Path.Combine(vdir, "none.exe")) == null, "a missing file has no version");
+
+                    // Состояние: то же самое второй раз окно не перерисовывает
+                    var seen = new AppEntry { Id = "selftest-seen", Name = "One", Kind = "portable", Exe = "Copy.exe", Process = "CoreTxtNoSuchProcess" };
+                    AppOps.HomeOverride = vdir;   // папка проверки во временной папке — но это «дом», значит, путь годится
+                    State.Paths["selftest-seen"] = exe;
+                    var st = new AppStatus();
+                    var procs = ProcSnap.Take(AppOps.ProcessNames(new AppEntry[] { seen }));
+                    Check(AppOps.Apply(seen, st, AppOps.Look(seen, AppOps.SavedPath(seen), procs)) && st.Path == exe && st.Version == mine && !st.Running, "the first check changes the card");
+                    int checks = st.Checks;
+                    Check(!AppOps.Apply(seen, st, AppOps.Look(seen, AppOps.SavedPath(seen), procs)) && st.Checks == checks + 1, "the same answer again changes nothing, but counts as a check");
+                    st.Running = true;
+                    Check(!AppOps.Apply(seen, st, AppOps.Look(seen, AppOps.SavedPath(seen), null)) && st.Running, "a check without processes leaves «running» as it was");
+                    Check(AppOps.Apply(seen, st, AppOps.Look(seen, AppOps.SavedPath(seen), procs)) && !st.Running, "a process that is gone is a change");
+                    var r1 = new Release { Version = new Version(1, 2, 3), Url = "u" };
+                    var a1 = new AppStatus { Path = "x", Version = new Version(1, 0, 0), Latest = r1 };
+                    var a2 = new AppStatus { Path = "X", Version = new Version(1, 0, 0), Latest = new Release { Version = new Version(1, 2, 3), Url = "u" } };
+                    Check(Seen.Of(a1).Same(Seen.Of(a2)), "the same state compares equal");
+                    a2.Lost = true;
+                    Check(!Seen.Of(a1).Same(Seen.Of(a2)), "a lost plugin is a change");
+                    a2.Lost = false; a2.Latest = new Release { Version = new Version(1, 3, 0), Url = "u" };
+                    Check(!Seen.Of(a1).Same(Seen.Of(a2)), "a new release is a change");
+                    a2.Latest = r1; a2.Path = null;
+                    Check(!Seen.Of(a1).Same(Seen.Of(a2)), "an app that disappeared is a change");
+                }
+                finally
+                {
+                    AppOps.HomeOverride = null;
+                    State.Paths.Remove("selftest-seen");
+                    try { System.IO.Directory.Delete(vdir, true); } catch { }
                 }
             }
 

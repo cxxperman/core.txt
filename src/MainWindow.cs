@@ -351,7 +351,11 @@ namespace DevTxt.Core
                 Cards.Add(c);
                 grid.Children.Add(c.Root);
             }
-            if (DemoMode) Demo(); else foreach (var c in Cards) { AppOps.Refresh(c.App, c.S); InstalledApps.Sync(c.App, c.S); }
+            if (DemoMode) { Demo(); return; }
+            // Первое состояние — по диску, без обхода процессов: окно не ждёт его. «Запущено» через мгновение
+            // дотянет фоновая проверка; стоит ли программа, она уже не поменяет — карточки не мигают
+            foreach (var c in Cards) { AppOps.Apply(c.App, c.S, AppOps.Look(c.App, AppOps.SavedPath(c.App), null)); InstalledApps.Sync(c.App, c.S); }
+            CheckLocal(false, true);
         }
 
         // В каком порядке встанут карточки после обновления каталога: как в каталоге; приложение, которого там больше нет,
@@ -373,6 +377,7 @@ namespace DevTxt.Core
                 delegate(string id) { Card c = was(id); return c != null && c.S.Phase != Phase.Idle; });
             Cards.Clear();
             grid.Children.Clear();
+            var procs = ProcSnap.Take(AppOps.ProcessNames(Catalog.Apps));   // один обход процессов на все новые карточки
             foreach (string id in order)
             {
                 Card before = was(id), c = before;
@@ -382,7 +387,7 @@ namespace DevTxt.Core
                     c = new Card(app, before != null ? before.S : null);
                     c.Remove = RemoveApp;
                     c.Changed = RenderAll;
-                    AppOps.Refresh(c.App, c.S);
+                    AppOps.Refresh(c.App, c.S, procs);
                     InstalledApps.Sync(c.App, c.S);
                 }
                 Cards.Add(c);
@@ -883,11 +888,38 @@ namespace DevTxt.Core
         }
 
         // ───────── Действия с приложениями ─────────
-        void RefreshLocal()
+        void RefreshLocal() { CheckLocal(false, false); }
+
+        bool checkingLocal;   // фоновая проверка идёт — следующая не начинается поверх неё
+
+        // Что с приложениями на диске и среди процессов. Обход процессов и диска — в фоне, в поток окна
+        // возвращается готовый ответ; окно перерисовывается, только если что-то поменялось.
+        // launching — только те, что сейчас запускаются; always — даже если окна не видно (сразу после запуска)
+        async void CheckLocal(bool launching, bool always)
         {
-            if (!IsVisible) return;
-            foreach (var c in Cards) if (c.S.Phase == Phase.Idle) { AppOps.Refresh(c.App, c.S); InstalledApps.Sync(c.App, c.S); }
-            if (page == PApps) RenderAll();
+            if (checkingLocal || (!always && !IsVisible)) return;
+            var batch = new List<Card>();
+            foreach (var c in Cards)
+                if (c.S.Phase == Phase.Idle && (!launching || c.S.LaunchUntil != DateTime.MinValue)) batch.Add(c);
+            if (batch.Count == 0) return;
+            var apps = batch.ConvertAll(delegate(Card c) { return c.App; });
+            var saved = apps.ConvertAll(delegate(AppEntry a) { return AppOps.SavedPath(a); });
+            var checks = batch.ConvertAll(delegate(Card c) { return c.S.Checks; });
+            checkingLocal = true;
+            List<Probe> found = null;
+            try { found = await Task.Run(delegate { return AppOps.LookAll(apps, saved); }); }
+            catch { }
+            finally { checkingLocal = false; }
+            if (found == null || quitting) return;
+            bool changed = false;
+            for (int i = 0; i < batch.Count; i++)
+            {
+                Card c = batch[i];
+                // Пока шла проверка, с карточкой что-то делали (установка, удаление) или её уже проверили заново — ответ устарел
+                if (found[i] == null || c.S.Phase != Phase.Idle || c.S.Checks != checks[i] || !Cards.Contains(c)) continue;
+                if (AppOps.Apply(c.App, c.S, found[i])) { changed = true; InstalledApps.Sync(c.App, c.S); }
+            }
+            if (changed && (page == PApps || launching)) RenderAll();
         }
 
         async void CheckAll()
@@ -1063,15 +1095,15 @@ namespace DevTxt.Core
         // Пока какое-то приложение запускается, смотрим на список процессов чаще обычного
         void WatchLaunches()
         {
-            bool waiting = false;
+            bool waiting = false, ended = false;
             foreach (var c in Cards)
             {
                 if (c.S.LaunchUntil == DateTime.MinValue) continue;
-                if (c.S.Phase == Phase.Idle) AppOps.Refresh(c.App, c.S);
-                if (c.S.Launching) waiting = true; else c.S.LaunchUntil = DateTime.MinValue;
+                if (c.S.Launching) waiting = true; else { c.S.LaunchUntil = DateTime.MinValue; ended = true; }
             }
             if (!waiting) launchTimer.Stop();
-            RenderAll();
+            if (ended) RenderAll();   // появилось или ждать надоело — «Запускается…» уходит с кнопки
+            if (waiting) CheckLocal(true, true);   // в фоне; увидит запущенным — перерисует само
         }
 
         // ───────── Для снимков и проверки вида: выдуманные состояния, сеть, диск и реестр не трогаются ─────────

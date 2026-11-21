@@ -64,22 +64,23 @@ namespace DevTxt.Core
         static bool DiscordRunning()
         {
             if (Fake) return false;
-            try
-            {
-                foreach (string name in Names)
-                {
-                    System.Diagnostics.Process[] ps = System.Diagnostics.Process.GetProcessesByName(name);
-                    foreach (System.Diagnostics.Process p in ps) p.Dispose();
-                    if (ps.Length > 0) return true;
-                }
-            }
-            catch { }
-            return false;
+            return Running(ProcSnap.Take(Names));   // один обход системы на все три имени; завершившиеся не в счёт
         }
 
         // Ответ, когда Discord открыт: карточка по нему предлагает «Закрыть Discord и подключить»
         public const string NeedClose = "закройте Discord (и в трее у часов) и нажмите ещё раз";
         public static bool Running() { return DiscordRunning(); }
+
+        // Имена процессов Discord — для общего снимка процессов карточек
+        public static string[] ProcessNames { get { return (string[])Names.Clone(); } }
+
+        // То же по готовому снимку процессов: проверка карточек обходит систему один раз на всех
+        public static bool Running(ProcSnap procs)
+        {
+            if (Fake || procs == null) return false;
+            foreach (string name in Names) if (procs.Has(name)) return true;
+            return false;
+        }
 
         // Закрыть Discord (и в трее у часов) — только по кнопке «Закрыть Discord и …» на карточке, которую нажал сам
         // человек. Возвращает, какие из Discord были открыты: их потом запускаем снова (StartDiscord)

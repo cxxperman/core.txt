@@ -441,6 +441,7 @@ namespace DevTxt.Core
                         try { if (dir != null && Directory.Exists(dir)) Directory.Delete(dir, true); }
                         catch { throw new Exception("Не удалось убрать папку — закройте Steam и попробуйте ещё раз"); }
                     }
+                Stash.Clear(app.Id);
                 return;
             }
             string path = s.Path;
@@ -472,6 +473,7 @@ namespace DevTxt.Core
             }
             State.Paths.Remove(app.Id);
             State.Save();
+            Stash.Clear(app.Id);   // запас для обновлений удалённому приложению ни к чему
             if (withData && app.Data != null)
             {
                 string data = Expand(app.Data);
@@ -759,7 +761,7 @@ namespace DevTxt.Core
                 string marker = Expand(app.Marker);
                 if (marker != null && File.Exists(marker) && s.Latest != null)
                     File.WriteAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(marker), VersionFile), s.Latest.Version.ToString());
-                Releases.TryDelete(file);
+                if (!Stash.Holds(file)) Releases.TryDelete(file);   // файл из запаса нужен следующему обновлению
                 return;
             }
             if (app.Kind == "installer")
@@ -771,7 +773,7 @@ namespace DevTxt.Core
                     if (!p.WaitForExit(10 * 60 * 1000)) throw new Exception("Установщик не закончил работу за десять минут");
                     if (p.ExitCode != 0) throw new Exception("Установщик завершился с ошибкой " + p.ExitCode);
                 }
-                Releases.TryDelete(file);
+                if (!Stash.Holds(file)) Releases.TryDelete(file);   // файл из запаса нужен следующему обновлению
                 // Установщик закрыл приложение и не открыл снова — возвращаем как было
                 string installed = s.Path != null && File.Exists(s.Path) ? s.Path : Expand(app.Installed);
                 if (wasOpen && installed != null && File.Exists(installed)) { try { Launch(installed); } catch { } }
@@ -801,7 +803,7 @@ namespace DevTxt.Core
                 {
                     Releases.TryDelete(old);
                     if (File.Exists(target)) File.Move(target, old);   // прежняя версия остаётся рядом, пока новая не легла на место
-                    try { File.Move(file, target); }
+                    try { if (Stash.Holds(file)) File.Copy(file, target); else File.Move(file, target); }   // из запаса — копия: он ещё пригодится
                     catch { if (File.Exists(old) && !File.Exists(target)) File.Move(old, target); throw; }
                     Releases.TryDelete(old);
                     last = null;

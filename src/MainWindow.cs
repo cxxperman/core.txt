@@ -1003,7 +1003,7 @@ namespace DevTxt.Core
                 }
                 Release r = c.S.Latest;
                 Action<long, long> progress = delegate(long done, long total) { Dispatcher.BeginInvoke(new Action(delegate { c.S.Done = done; c.S.Total = total; c.S.Progress = total > 0 ? (double)done / total : 0; if (c.S.Phase == Phase.Downloading) { c.Render(Install, Open, Find, Connect, Connected); RenderWelcome(); } })); };
-                string file = await Task.Run(delegate { return Releases.Download(r, progress); });
+                string file = await Task.Run(delegate { return Releases.Download(r, app.Id, progress); });
                 c.S.Phase = Phase.Installing;
                 RenderAll();
                 await Task.Run(delegate { AppOps.Install(app, c.S, file); });

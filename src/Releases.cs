@@ -1,6 +1,7 @@
 // core.txt. Releases.cs — что выложено на GitHub и как это скачать.
 // Единственный источник — релизы репозитория приложения. Скачанный файл должен совпасть с тем, что указано
 // в релизе: по размеру и по контрольной сумме SHA-256. Не совпал — файл удаляется и не запускается.
+// Есть у релиза карта блоков — изменившееся докачивается к прежнему файлу из запаса (BlockMap.cs), проверка та же.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -16,10 +17,11 @@ namespace DevTxt.Core
         public Version Version;
         public string Url, Sha, Name;
         public long Size;
+        public string MapUrl;   // карта блоков рядом с файлом (X.exe.blockmap) — по ней обновление докачивает только изменившееся
 
         public Dictionary<string, object> ToDict()
         {
-            return new Dictionary<string, object> { { "version", Version.ToString() }, { "url", Url }, { "sha", Sha ?? "" }, { "name", Name }, { "size", Size.ToString() } };
+            return new Dictionary<string, object> { { "version", Version.ToString() }, { "url", Url }, { "sha", Sha ?? "" }, { "name", Name }, { "size", Size.ToString() }, { "map", MapUrl ?? "" } };
         }
 
         public static Release From(Dictionary<string, object> d)
@@ -28,7 +30,9 @@ namespace DevTxt.Core
             if (d == null || !Version.TryParse(Json.Str(d, "version") ?? "", out v) || !long.TryParse(Json.Str(d, "size") ?? "", out size)) return null;
             string url = Json.Str(d, "url"), name = Json.Str(d, "name");
             if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(name)) return null;
-            return new Release { Version = v, Url = url, Sha = Json.Str(d, "sha"), Name = name, Size = size };
+            string map = Json.Str(d, "map");
+            if (map != null && !map.StartsWith("https://github.com/", StringComparison.Ordinal)) map = null;   // в старых записях карты нет
+            return new Release { Version = v, Url = url, Sha = Json.Str(d, "sha"), Name = name, Size = size, MapUrl = map };
         }
     }
 
@@ -117,6 +121,13 @@ namespace DevTxt.Core
                         Version = v, Url = url, Name = name, Size = Convert.ToInt64(size ?? 0),
                         Sha = digest.StartsWith("sha256:") ? digest.Substring(7).Trim().ToLowerInvariant() : null
                     };
+                    // Карта блоков — ровно «имя файла + .blockmap», из того же релиза того же репозитория
+                    foreach (object mo in Json.List(rel, "assets"))
+                    {
+                        var ma = mo as Dictionary<string, object>;
+                        string mapUrl = Json.Str(ma, "browser_download_url");
+                        if (Json.Str(ma, "name") == name + ".blockmap" && mapUrl != null && mapUrl.StartsWith(prefix, StringComparison.Ordinal)) { best.MapUrl = mapUrl; break; }
+                    }
                     break;
                 }
             }
@@ -135,12 +146,78 @@ namespace DevTxt.Core
         }
 
         // Скачивает файл релиза во временную папку и возвращает путь к нему. progress — сколько байт скачано и сколько всего.
-        public static string Download(Release r, Action<long, long> progress)
+        public static string Download(Release r, Action<long, long> progress) { return Download(r, null, progress); }
+
+        // stash — id приложения, для которого держится запас (null — не держится, как у самого core.txt). Если у релиза
+        // есть карта блоков, а в запасе лежит прежний файл со своей картой, качается только изменившееся, и progress
+        // считает именно то, что идёт из сети. Скачанный файл с картой ложится в запас, и тогда возвращается путь в запасе.
+        public static string Download(Release r, string stash, Action<long, long> progress)
         {
             if (string.IsNullOrEmpty(r.Sha)) throw new Exception("В релизе нет контрольной суммы файла — ставить его небезопасно");
             string dir = Path.Combine(Path.GetTempPath(), "core.txt");
             Directory.CreateDirectory(dir);
             string file = Path.Combine(dir, Path.GetFileName(r.Name)), part = file + ".part";
+            byte[] map = null;
+            if (stash != null && r.MapUrl != null)
+            {
+                try { map = GetBytes(r.MapUrl); } catch { }
+                if (BlockMap.Parse(map) == null) map = null;   // непонятная карта — как будто её нет
+            }
+            if (map == null || !TryPatch(r, stash, map, part, progress)) Full(r, part, progress);
+            try
+            {
+                if (File.Exists(file)) File.Delete(file);
+                File.Move(part, file);
+            }
+            catch { TryDelete(part); throw; }
+            if (map != null) return Stash.Put(stash, file, map);
+            if (stash != null && r.MapUrl == null) Stash.Clear(stash);   // у релиза карты нет — прежний запас больше не пригодится
+            return file;
+        }
+
+        // Сборка по картам. Любая неудача — false, без шума: дальше файл качается целиком
+        internal static bool TryPatch(Release r, string id, byte[] map, string part, Action<long, long> progress)
+        {
+            try
+            {
+                string oldFile;
+                byte[] oldMap;
+                if (!Stash.Find(id, out oldFile, out oldMap)) return false;
+                PatchPlan plan = Patch.Make(BlockMap.Parse(oldMap), new FileInfo(oldFile).Length, BlockMap.Parse(map), r.Size);
+                if (plan == null) return false;
+                string hash;
+                int last = Environment.TickCount;
+                using (var input = new FileStream(oldFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (var output = File.Create(part))
+                    hash = Patch.Assemble(plan, input, delegate(long at, long length) { return Range(r.Url, at, length); }, output,
+                        delegate(long got) { if (progress != null && Environment.TickCount - last > 80) { last = Environment.TickCount; progress(got, plan.Download); } });
+                if (new FileInfo(part).Length != r.Size || hash != r.Sha) { TryDelete(part); return false; }
+                if (progress != null) progress(plan.Download, plan.Download);
+                return true;
+            }
+            catch { TryDelete(part); return false; }
+        }
+
+        // Байты файла с at, ровно length штук. Сервер, который вместо куска отдаёт весь файл (200) или не тот кусок, —
+        // отказ: такой ответ нельзя вклеить в файл
+        internal static Stream Range(string url, long at, long length)
+        {
+            var rq = Request(url);
+            rq.Timeout = 30000;
+            rq.AddRange(at, at + length - 1);
+            var rs = (HttpWebResponse)rq.GetResponse();
+            try
+            {
+                string range = rs.Headers["Content-Range"] ?? "";
+                if (rs.StatusCode != HttpStatusCode.PartialContent || !range.StartsWith("bytes " + at + "-" + (at + length - 1) + "/", StringComparison.Ordinal))
+                    throw new Exception("the server did not send the asked range");
+                return rs.GetResponseStream();   // закрытие потока освобождает и ответ
+            }
+            catch { rs.Close(); throw; }
+        }
+
+        static void Full(Release r, string part, Action<long, long> progress)
+        {
             try
             {
                 var rq = Request(r.Url);
@@ -167,9 +244,6 @@ namespace DevTxt.Core
                 }
                 if (total != r.Size) throw new Exception("Файл скачался не целиком");
                 if (hash != r.Sha) throw new Exception("Контрольная сумма файла не совпала с релизом");
-                if (File.Exists(file)) File.Delete(file);
-                File.Move(part, file);
-                return file;
             }
             catch (WebException) { TryDelete(part); throw new Exception("Не удалось скачать: нет связи с GitHub"); }
             catch { TryDelete(part); throw; }

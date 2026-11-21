@@ -15,6 +15,9 @@
 //   --latest            спросить у GitHub последние версии приложений из каталога и напечатать их
 //   --bench             замерить, сколько стоит проверка приложений (диск и процессы) на этом компьютере
 //   --fetch адрес сумма размер   скачать файл с проверкой размера и SHA-256 (для проверки на своём компьютере)
+//   --range адрес начало длина   скачать кусок файла запросом Range и напечатать его SHA-256
+//   --patch адрес сумма размер файл   собрать файл релиза по картам блоков: «прежний» — испорченная копия файла,
+//                       недостающее — запросами Range (карты строятся на месте; настоящих настроек и запаса не трогает)
 using System;
 using System.Net;
 using System.Threading;
@@ -52,6 +55,8 @@ namespace DevTxt.Core
                     Thread.Sleep(Timeout.Infinite);
                 }
             if (args.Length == 4 && args[0] == "--fetch") return SelfTest.Fetch(args[1], args[2], args[3]);
+            if (args.Length == 4 && args[0] == "--range") return SelfTest.RangeNow(args[1], args[2], args[3]);
+            if (args.Length == 5 && args[0] == "--patch") return SelfTest.PatchNow(args[1], args[2], args[3], args[4]);
 
             int page = 0;
             string section = null;   // раздел настроек
@@ -286,6 +291,171 @@ namespace DevTxt.Core
             }
         }
 
+        static byte[] Gzip(byte[] data)
+        {
+            var ms = new System.IO.MemoryStream();
+            using (var z = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionMode.Compress)) z.Write(data, 0, data.Length);
+            return ms.ToArray();
+        }
+
+        // Карта в формате electron-builder для данных data: блоки заданной длины с offset; сумма блока — SHA-256 в base64
+        // (какие суммы у electron-builder, неважно: core.txt их только сравнивает)
+        internal static string MapJson(byte[] data, long offset, long[] sizes)
+        {
+            var sums = new System.Collections.Generic.List<object>();
+            var lens = new System.Collections.Generic.List<object>();
+            long pos = offset;
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                foreach (long n in sizes) { sums.Add(Convert.ToBase64String(sha.ComputeHash(data, (int)pos, (int)n))); lens.Add(n); pos += n; }
+            var file = new System.Collections.Generic.Dictionary<string, object> { { "name", "file" }, { "offset", offset }, { "checksums", sums }, { "sizes", lens } };
+            return Json.Write(new System.Collections.Generic.Dictionary<string, object> { { "version", "2" }, { "files", new object[] { file } } });
+        }
+
+        // Блоки по block байт подряд, последний — сколько осталось
+        internal static long[] Even(long length, long block)
+        {
+            var list = new System.Collections.Generic.List<long>();
+            for (long at = 0; at < length; at += block) list.Add(Math.Min(block, length - at));
+            return list.ToArray();
+        }
+
+        static string Sha(byte[] data)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(data)).Replace("-", "").ToLowerInvariant();
+        }
+
+        // Обновление по карте блоков: разбор карты, план, сборка, запас — всё без сети
+        static void BlockMapChecks()
+        {
+            var utf = System.Text.Encoding.UTF8;
+            var rnd = new Random(7);
+            var old = new byte[800];
+            rnd.NextBytes(old);
+            Func<int, byte[]> block = delegate(int i) { var b = new byte[100]; Array.Copy(old, i * 100, b, 0, 100); return b; };
+            var fresh = new byte[100]; rnd.NextBytes(fresh);
+            var other = new byte[100]; rnd.NextBytes(other);
+            var head = new byte[10]; rnd.NextBytes(head);
+            var tail = new byte[5]; rnd.NextBytes(tail);
+            // Новый файл: заголовок вне карты, блоки 0,1 как были, новый, 3,4 как были, 6 и 5 поменялись местами, новый, хвост вне карты
+            var parts = new byte[][] { head, block(0), block(1), fresh, block(3), block(4), block(6), block(5), other, tail };
+            var ms = new System.IO.MemoryStream();
+            foreach (byte[] p in parts) ms.Write(p, 0, p.Length);
+            byte[] neu = ms.ToArray();
+            string oldJson = MapJson(old, 0, Even(800, 100)), newJson = MapJson(neu, 10, Even(800, 100));
+
+            // Разбор: gzip, сырой deflate и просто JSON — одно и то же; мусор и пустота — «карты нет»
+            BlockMap om = BlockMap.Parse(Gzip(utf.GetBytes(oldJson)));
+            Check(om != null && om.Offset == 0 && om.Sizes.Length == 8 && om.Sizes[7] == 100 && om.End == 800 && om.Sums[0] == Convert.ToBase64String(System.Security.Cryptography.SHA256.Create().ComputeHash(block(0))),"a gzip block map is read");
+            var deflated = new System.IO.MemoryStream();
+            using (var z = new System.IO.Compression.DeflateStream(deflated, System.IO.Compression.CompressionMode.Compress)) { byte[] b = utf.GetBytes(newJson); z.Write(b, 0, b.Length); }
+            BlockMap nm = BlockMap.Parse(deflated.ToArray());
+            Check(nm != null && nm.Offset == 10 && nm.End == 810, "a raw deflate block map is read");
+            BlockMap plain = BlockMap.Parse(utf.GetBytes(newJson));
+            Check(plain != null && plain.Offset == 10 && plain.Sums[2] == nm.Sums[2], "a plain JSON block map is read");
+            var junk = new byte[300]; rnd.NextBytes(junk);
+            Check(BlockMap.Parse(junk) == null && BlockMap.Parse(new byte[0]) == null && BlockMap.Parse(null) == null && BlockMap.Parse(Gzip(junk)) == null, "junk or an empty file is no block map");
+            Check(BlockMap.Parse(utf.GetBytes("{\"version\":\"2\",\"files\":[{\"name\":\"file\",\"offset\":0,\"checksums\":[\"a\",\"b\"],\"sizes\":[5]}]}")) == null
+                && BlockMap.Parse(utf.GetBytes("{\"version\":\"2\",\"files\":[{\"name\":\"file\",\"offset\":0,\"checksums\":[\"a\"],\"sizes\":[0]}]}")) == null
+                && BlockMap.Parse(utf.GetBytes("{\"version\":\"2\",\"files\":[]}")) == null && BlockMap.Parse(utf.GetBytes("[1,2]")) == null, "a block map that does not add up is no block map");
+
+            // План: что берётся из прежнего файла и откуда, что качается
+            Func<PatchPlan, string> show = delegate(PatchPlan p)
+            {
+                if (p == null) return "full";
+                var sb = new System.Text.StringBuilder();
+                foreach (Piece x in p.Pieces) sb.Append(x.Local ? "L" + x.At + "-" + (x.At + x.Length) + "@" + x.From + " " : "R" + x.At + "-" + (x.At + x.Length) + " ");
+                return sb.ToString().Trim();
+            };
+            PatchPlan plan = Patch.Make(om, 800, nm, neu.Length, 0, 100, 0.7);
+            Check(show(plan) == "R0-10 L10-210@0 R210-310 L310-510@300 L510-610@600 L610-710@500 R710-815", "the plan reuses unchanged blocks and fetches the rest, got " + show(plan));
+            Check(plan != null && plan.Requests == 3 && plan.Download == 10 + 100 + 105, "the plan counts what goes over the network");
+            PatchPlan close = Patch.Make(om, 800, nm, neu.Length, 200, 100, 0.7);
+            Check(show(close) == "R0-310 L310-510@300 L510-610@600 L610-710@500 R710-815" && close.Requests == 2 && close.Download == 415, "ranges with a small gap between them become one request, got " + show(close));
+            Check(Patch.Make(om, 800, nm, neu.Length, 200, 100, 0.4) == null, "too much to fetch — the whole file instead");
+            Check(Patch.Make(om, 800, nm, neu.Length, 0, 2, 0.7) == null, "too many requests — the whole file instead");
+            Check(Patch.Make(om, 800, nm, neu.Length) == null, "a tiny file with the default gap is fetched whole");
+            Check(Patch.Make(om, 799, nm, neu.Length, 0, 100, 0.7) == null && Patch.Make(om, 800, nm, 809, 0, 100, 0.7) == null && Patch.Make(null, 800, nm, neu.Length, 0, 100, 0.7) == null,
+                "a map larger than its file means no partial download");
+            PatchPlan same = Patch.Make(om, 800, om, 800, 0, 100, 0.7);
+            Check(show(same) == "L0-800@0" && same.Requests == 0 && same.Download == 0, "the same file needs nothing from the network");
+
+            // Сборка: из прежнего файла и подставного «сервера» выходит ровно новый файл
+            int asked = 0;
+            Func<long, long, System.IO.Stream> server = delegate(long at, long length) { asked++; return new System.IO.MemoryStream(neu, (int)at, (int)length, false); };
+            var built = new System.IO.MemoryStream();
+            long got = 0;
+            string hash = Patch.Assemble(plan, new System.IO.MemoryStream(old, false), server, built, delegate(long n) { got = n; });
+            Check(Convert.ToBase64String(built.ToArray()) == Convert.ToBase64String(neu) && hash == Sha(neu), "the assembled file equals the new one byte for byte");
+            Check(asked == plan.Requests && got == plan.Download, "assembly asks only the planned ranges and counts them, got " + asked + " requests, " + got + " bytes");
+            built = new System.IO.MemoryStream();
+            Check(Patch.Assemble(close, new System.IO.MemoryStream(old, false), server, built, null) == Sha(neu), "merged ranges assemble the same file");
+            // Прежний файл испорчен — сумма не сходится, и такой файл не ставится
+            var broken = (byte[])old.Clone();
+            broken[350] ^= 0xFF;
+            Check(Patch.Assemble(plan, new System.IO.MemoryStream(broken, false), server, new System.IO.MemoryStream(), null) != Sha(neu), "a damaged old file gives a different checksum");
+            Func<Func<long, long, System.IO.Stream>, bool> fails = delegate(Func<long, long, System.IO.Stream> f)
+            {
+                try { Patch.Assemble(plan, new System.IO.MemoryStream(old, false), f, new System.IO.MemoryStream(), null); return false; }
+                catch { return true; }
+            };
+            Check(fails(delegate(long at, long length) { return new System.IO.MemoryStream(neu, (int)at, (int)length - 1, false); }), "a range shorter than asked is refused");
+            Check(fails(delegate(long at, long length) { return new System.IO.MemoryStream(neu, (int)at, (int)Math.Min(length + 1, neu.Length - at), false); }), "a range longer than asked is refused");
+            Check(fails(delegate(long at, long length) { throw new System.Net.WebException("no network"); }), "a network failure stops the assembly");
+
+            // Релиз помнит адрес карты; чужая карта и карта под другим именем не считаются; старые записи читаются
+            var app = new AppEntry { Repo = "cxxperman/two", Asset = "Two-Setup-*.exe" };
+            string sha = new string('b', 64), dl = "https://github.com/cxxperman/two/releases/download/";
+            Release r = Releases.Pick(app, @"[
+                { ""tag_name"": ""v2.0.0"", ""assets"": [
+                    { ""name"": ""Two-Setup-2.0.0.exe.blockmap"", ""size"": 3, ""browser_download_url"": """ + dl + @"v2.0.0/Two-Setup-2.0.0.exe.blockmap"" },
+                    { ""name"": ""Two-Setup-2.0.0.exe"", ""size"": 9, ""browser_download_url"": """ + dl + @"v2.0.0/Two-Setup-2.0.0.exe"", ""digest"": ""sha256:" + sha + @""" } ] },
+                { ""tag_name"": ""v1.0.0"", ""assets"": [
+                    { ""name"": ""Two-Setup-1.0.0.exe"", ""size"": 9, ""browser_download_url"": """ + dl + @"v1.0.0/Two-Setup-1.0.0.exe"", ""digest"": ""sha256:" + sha + @""" } ] }
+            ]");
+            Check(r != null && r.Version == new Version(2, 0, 0) && r.Name == "Two-Setup-2.0.0.exe" && r.MapUrl == dl + "v2.0.0/Two-Setup-2.0.0.exe.blockmap", "the block map next to the file is found");
+            Release back = r == null ? null : Release.From(Json.Parse(Json.Write(r.ToDict())));
+            Check(back != null && back.MapUrl == r.MapUrl && back.Url == r.Url && back.Sha == r.Sha, "a release with a block map survives saving and loading");
+            Release foreign = Releases.Pick(app, @"[ { ""tag_name"": ""v2.0.0"", ""assets"": [
+                    { ""name"": ""Two-Setup-2.0.0.exe"", ""size"": 9, ""browser_download_url"": """ + dl + @"v2.0.0/Two-Setup-2.0.0.exe"", ""digest"": ""sha256:" + sha + @""" },
+                    { ""name"": ""Two-Setup-2.0.0.exe.blockmap"", ""size"": 3, ""browser_download_url"": ""https://github.com/someone/else/releases/download/v2.0.0/Two-Setup-2.0.0.exe.blockmap"" },
+                    { ""name"": ""Two-Setup-1.9.0.exe.blockmap"", ""size"": 3, ""browser_download_url"": """ + dl + @"v2.0.0/Two-Setup-1.9.0.exe.blockmap"" } ] } ]");
+            Check(foreign != null && foreign.MapUrl == null, "a block map from another repository or for another file is ignored");
+            Release legacy = Release.From(Json.Parse("{\"version\":\"1.0.0\",\"url\":\"" + dl + "v1.0.0/Two-Setup-1.0.0.exe\",\"sha\":\"" + sha + "\",\"name\":\"Two-Setup-1.0.0.exe\",\"size\":\"9\"}"));
+            Check(legacy != null && legacy.MapUrl == null && legacy.Size == 9, "a release saved before block maps loads without one");
+            Release none = Release.From(Json.Parse(Json.Write(legacy.ToDict())));
+            Check(none != null && none.MapUrl == null, "a release without a block map stays without one after saving");
+
+            // Запас: кладётся переносом, заменяет прежний, стирается; файл из запаса установка не уносит
+            Check(Stash.Root.StartsWith(System.IO.Path.GetTempPath(), StringComparison.OrdinalIgnoreCase), "the self-test keeps its stash in a temporary folder");
+            string tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-stash-" + System.Diagnostics.Process.GetCurrentProcess().Id);
+            System.IO.Directory.CreateDirectory(tmp);
+            try
+            {
+                string f1 = System.IO.Path.Combine(tmp, "Two-Setup-1.0.0.exe"), f2 = System.IO.Path.Combine(tmp, "Two-Setup-2.0.0.exe");
+                System.IO.File.WriteAllBytes(f1, old);
+                string in1 = Stash.Put("selftest-two", f1, utf.GetBytes(oldJson));
+                string file; byte[] map;
+                Check(in1 != f1 && !System.IO.File.Exists(f1) && System.IO.File.Exists(in1) && Stash.Holds(in1) && !Stash.Holds(f2), "a downloaded file moves into the stash, no second copy");
+                Check(Stash.Find("selftest-two", out file, out map) && file == in1 && BlockMap.Parse(map) != null, "the stash gives back the file and its map");
+                System.IO.File.WriteAllBytes(f2, neu);
+                string in2 = Stash.Put("selftest-two", f2, utf.GetBytes(newJson));
+                Check(System.IO.File.Exists(in2) && !System.IO.File.Exists(in1) && System.IO.Directory.GetFiles(System.IO.Path.GetDirectoryName(in2)).Length == 2, "a new file replaces the previous one: one file and one map");
+                Check(Stash.Find("selftest-two", out file, out map) && file == in2 && BlockMap.Parse(map).Offset == 10, "the stash holds the newest file");
+                Check(Stash.Put("..", f2, utf.GetBytes(newJson)) == f2 && Stash.Put("selftest-two", f2, null) == f2, "no stash without a map or for a strange id");
+
+                // Переносное приложение из запаса — копией: запас остаётся для следующего обновления
+                AppOps.HomeOverride = System.IO.Path.Combine(tmp, "home");
+                string target = System.IO.Path.Combine(AppOps.HomeOverride, "Two", "Two.exe");
+                AppOps.Install(new AppEntry { Id = "selftest-two", Name = "Two", Kind = "portable", Exe = "Two.exe", Process = "CoreTxtNoSuchProcess" }, new AppStatus { Path = target }, in2);
+                Check(System.IO.File.Exists(target) && System.IO.File.Exists(in2), "installing from the stash copies the file and keeps the stash");
+                State.Paths.Remove("selftest-two");
+
+                Stash.Clear("selftest-two");
+                Check(!Stash.Find("selftest-two", out file, out map) && !System.IO.Directory.Exists(System.IO.Path.GetDirectoryName(in2)), "the stash of an app is wiped");
+            }
+            finally { AppOps.HomeOverride = null; try { System.IO.Directory.Delete(tmp, true); } catch { } }
+        }
+
         static void Checks()
         {
             Check(State.FilePath.StartsWith(System.IO.Path.GetTempPath(), StringComparison.OrdinalIgnoreCase), "the self-test keeps its state in a temporary folder");
@@ -495,6 +665,7 @@ namespace DevTxt.Core
             }
 
             DiscordChecks();
+            BlockMapChecks();
 
             // Набор (тема и плагин для Steam): принимается только в папку Steam и раскладывается строго по своим местам
             {
@@ -904,7 +1075,7 @@ namespace DevTxt.Core
                 s.Latest = Releases.Latest(app);
                 if (s.Latest == null) { Console.WriteLine("в релизах нет файла " + app.Asset); return 3; }
                 if (s.Installed && s.Version != null && s.Latest.Version <= s.Version) { Console.WriteLine("уже последняя версия " + s.Version); return 0; }
-                string file = Releases.Download(s.Latest, null);
+                string file = Releases.Download(s.Latest, app.Id, null);
                 AppOps.Install(app, s, file);
                 AppOps.Refresh(app, s);
                 Console.WriteLine("стало: " + (s.Installed ? (s.Version == null ? "установлено" : s.Version.ToString()) + " — " + s.Path : "не установлено"));
@@ -946,6 +1117,45 @@ namespace DevTxt.Core
                 return 0;
             }
             catch (Exception e) { Console.WriteLine("refused: " + e.Message); return 1; }
+        }
+
+        public static int RangeNow(string url, string at, string length)
+        {
+            try
+            {
+                var ms = new System.IO.MemoryStream();
+                using (var s = Releases.Range(url, long.Parse(at), long.Parse(length))) s.CopyTo(ms);
+                Console.WriteLine("ok " + ms.Length + " " + Sha(ms.ToArray()));
+                return 0;
+            }
+            catch (Exception e) { Console.WriteLine("refused: " + e.Message); return 1; }
+        }
+
+        // Настоящей карты блоков в релизах пока нет, поэтому карты строятся тут: новая — по целой копии файла,
+        // «прежняя» — по той же копии с тремя испорченными местами. Сборка идёт тем же путём, что и обновление.
+        public static int PatchNow(string url, string sha, string size, string copy)
+        {
+            string temp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-patch-" + System.Diagnostics.Process.GetCurrentProcess().Id);
+            State.DirOverride = temp;
+            try
+            {
+                byte[] whole = System.IO.File.ReadAllBytes(copy), damaged = (byte[])whole.Clone();
+                foreach (double share in new[] { 0.1, 0.5, 0.9 }) for (int i = 0; i < 1000; i++) damaged[(int)(whole.Length * share) + i] ^= 0x5A;
+                const long blockSize = 16 * 1024;
+                string id = "selftest-patch", src = System.IO.Path.Combine(temp, "old.bin");
+                System.IO.Directory.CreateDirectory(temp);
+                System.IO.File.WriteAllBytes(src, damaged);
+                Stash.Put(id, src, System.Text.Encoding.UTF8.GetBytes(MapJson(damaged, 0, Even(damaged.Length, blockSize))));
+                byte[] map = Gzip(System.Text.Encoding.UTF8.GetBytes(MapJson(whole, 0, Even(whole.Length, blockSize))));
+                var r = new Release { Url = url, Sha = sha.ToLowerInvariant(), Size = long.Parse(size), Name = "patch-test.bin" };
+                string part = System.IO.Path.Combine(temp, "new.part");
+                long done = 0, total = 0;
+                bool ok = Releases.TryPatch(r, id, map, part, delegate(long d, long t) { done = d; total = t; });
+                Console.WriteLine(ok ? "ok: fetched " + done + " of " + total + " bytes, file " + new System.IO.FileInfo(part).Length + " bytes" : "refused: fell back to the whole file");
+                return ok ? 0 : 1;
+            }
+            catch (Exception e) { Console.WriteLine("refused: " + e.Message); return 1; }
+            finally { State.DirOverride = null; try { System.IO.Directory.Delete(temp, true); } catch { } }
         }
     }
 }

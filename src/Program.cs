@@ -163,6 +163,127 @@ namespace DevTxt.Core
             done(Thread.CurrentThread.ManagedThreadId);
         }
 
+        // Maska: подключение к Discord — только на поддельных папках во временной директории. Настоящие %APPDATA%\Vencord
+        // и Discord не трогаются: папки подменяются переменными CORE_TEST_*, а запущенный Discord на них не смотрится
+        static void DiscordChecks()
+        {
+            var cat = Catalog.Read(@"{ ""apps"": [
+                { ""id"": ""m"", ""name"": ""M"", ""kind"": ""integration"", ""marker"": ""%APPDATA%\\Vencord\\dist\\kapsula.txt"", ""connector"": ""discord"" },
+                { ""id"": ""f"", ""name"": ""F"", ""kind"": ""integration"", ""marker"": ""%APPDATA%\\x.txt"", ""connector"": ""telegram"", ""via"": ""kapsula"", ""connect"": ""x.connect"" },
+                { ""id"": ""p"", ""name"": ""P"", ""kind"": ""portable"", ""repo"": ""cxxperman/p"", ""asset"": ""P.exe"", ""exe"": ""P.exe"", ""connector"": ""discord"" }
+            ] }");
+            Check(cat.Count == 3 && cat[0].IsConnector && cat[0].Connector == "discord" && cat[0].Via == null, "an integration with a known connector needs no via");
+            Check(cat.Count == 3 && !cat[1].IsConnector && cat[1].Connector == null && cat[1].IsIntegration && cat[1].Via == "kapsula" && cat[1].Connect == "x.connect", "an unknown connector is ignored, the entry stays an ordinary integration");
+            Check(cat.Count == 3 && !cat[2].IsConnector, "only an integration can be a connector");
+            AppEntry maska = Catalog.Apps.Find(delegate(AppEntry a) { return a.Id == "maska"; });
+            Check(maska != null && maska.IsConnector && maska.Via == null && maska.Connect == null && maska.Marker == "%APPDATA%\\Vencord\\dist\\kapsula.txt", "the built-in catalogue connects Maska from core.txt, with the old marker");
+
+            string pid = System.Diagnostics.Process.GetCurrentProcess().Id.ToString();
+            string tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-discord-" + pid);
+            string roam = System.IO.Path.Combine(tmp, "Roaming"), loc = System.IO.Path.Combine(tmp, "Local"), build = System.IO.Path.Combine(tmp, "build");
+            string res = System.IO.Path.Combine(loc, "Discord", "app-1.0.9268", "resources"), older = System.IO.Path.Combine(loc, "Discord", "app-1.0.9100", "resources");
+            string dist = System.IO.Path.Combine(roam, "Vencord", "dist"), bak = System.IO.Path.Combine(roam, "Vencord", "dist-before-kapsula");
+            string[] files = { "patcher.js", "preload.js", "renderer.js", "renderer.css" };
+            Func<string, string> read = delegate(string p) { return System.IO.File.Exists(p) ? System.IO.File.ReadAllText(p).Trim() : null; };
+            Action<string, string> fill = delegate(string dir, string text)
+            {
+                System.IO.Directory.CreateDirectory(dir);
+                foreach (string f in files) System.IO.File.WriteAllText(System.IO.Path.Combine(dir, f), text);
+            };
+            Func<bool> discordAsWas = delegate { return read(System.IO.Path.Combine(res, "app.asar")) == "discord" && !System.IO.File.Exists(System.IO.Path.Combine(res, "_app.asar")); };
+            var entry = new AppEntry { Id = "maska", Name = "Maska", Kind = "integration", Marker = "x", Connector = "discord" };
+            try
+            {
+                System.IO.Directory.CreateDirectory(res); System.IO.Directory.CreateDirectory(older);
+                string ourBuild = "// \"Maska\" build" + new string(' ', 120);
+                fill(build, ourBuild);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(res, "app.asar"), "discord");
+                Environment.SetEnvironmentVariable(DiscordInstall.TestRoaming, roam);
+                Environment.SetEnvironmentVariable(DiscordInstall.TestLocal, loc);
+                Environment.SetEnvironmentVariable(DiscordInstall.TestBuild, build);
+                Check(DiscordInstall.Marker.StartsWith(tmp, StringComparison.OrdinalIgnoreCase), "discord: the checks work in fake folders only");
+                Check(!DiscordInstall.Running(), "discord: on fake folders the real Discord does not count");
+
+                // «Наша ли сборка»: по строке "Maska" или, у сборок kapsula.txt, "Kapsula"
+                string b1 = System.IO.Path.Combine(tmp, "b1"), b2 = System.IO.Path.Combine(tmp, "b2"), b3 = System.IO.Path.Combine(tmp, "b3");
+                fill(b1, "x \"Maska\" y"); fill(b2, "x \"Kapsula\" y"); fill(b3, "x Maska Kapsula y");
+                Check(DiscordInstall.OurBuild(b1) && DiscordInstall.OurBuild(b2) && !DiscordInstall.OurBuild(b3) && !DiscordInstall.OurBuild(System.IO.Path.Combine(tmp, "none")), "discord: our build is told by \"Maska\" or \"Kapsula\" in quotes");
+
+                // 1) Vencord не было: core.txt встраивает сам — исходный app.asar → _app.asar, на его месте заглушка
+                Check(DiscordInstall.Install() == null, "discord: connect without Vencord");
+                Check(read(System.IO.Path.Combine(dist, "renderer.js")) == ourBuild.Trim(), "discord: the build is in place");
+                Check(read(System.IO.Path.Combine(res, "_app.asar")) == "discord", "discord: the original app.asar is kept as _app.asar");
+                byte[] stub = System.IO.File.ReadAllBytes(System.IO.Path.Combine(res, "app.asar"));
+                Check(stub.Length > 16 && BitConverter.ToUInt32(stub, 0) == 4 && DiscordInstall.IsStub(System.IO.Path.Combine(res, "app.asar")) && System.Text.Encoding.UTF8.GetString(stub).Contains("Vencord\\\\dist\\\\patcher.js"), "discord: app.asar is the Vencord stub that loads patcher.js");
+                Check(!System.IO.File.Exists(System.IO.Path.Combine(older, "_app.asar")), "discord: an older Discord version is left alone");
+                string[] mark = System.IO.File.ReadAllLines(DiscordInstall.Marker);
+                Check(mark.Length >= 2 && mark[0].StartsWith("core.txt · ") && mark[1] == "vencord=kapsula" && Array.IndexOf(mark, "injected=" + res) > 0, "discord: the marker keeps the kapsula.txt format, vencord=kapsula");
+                var st = new AppStatus();
+                AppOps.Refresh(entry, st);
+                Check(st.Installed && !st.Lost && !st.Running, "discord: the card sees it connected");
+                Check(DiscordInstall.Uninstall() == null, "discord: disconnect");
+                Check(discordAsWas() && !System.IO.File.Exists(System.IO.Path.Combine(dist, "renderer.js")) && !DiscordInstall.Installed && !System.IO.Directory.Exists(bak), "discord: after disconnect Discord is as it was and our build is gone");
+                AppOps.Refresh(entry, st);
+                Check(!st.Installed && !st.Lost, "discord: the card sees it disconnected");
+
+                // 2) Чужой Vencord уже стоит: меняются только его файлы, прежние — в резерв и обратно
+                System.IO.File.Move(System.IO.Path.Combine(res, "app.asar"), System.IO.Path.Combine(res, "_app.asar"));
+                System.IO.File.WriteAllText(System.IO.Path.Combine(res, "app.asar"), "vencord stub");
+                fill(dist, "official vencord");
+                Check(DiscordInstall.Install() == null, "discord: connect over Vencord");
+                Check(read(System.IO.Path.Combine(res, "app.asar")) == "vencord stub", "discord: Discord itself is not touched");
+                Check(read(System.IO.Path.Combine(bak, "renderer.js")) == "official vencord", "discord: the previous Vencord is in dist-before-kapsula");
+                Check(System.IO.File.ReadAllText(DiscordInstall.Marker).Contains("vencord=before"), "discord: the marker says vencord=before");
+                // Vencord переустановили — плагин пропал, карточка это видит; «Подключить заново» резерв не портит
+                System.IO.File.WriteAllText(System.IO.Path.Combine(dist, "renderer.js"), "official vencord again");
+                AppOps.Refresh(entry, st);
+                Check(st.Installed && st.Lost, "discord: a plugin gone from the build is noticed");
+                Check(DiscordInstall.Install() == null && DiscordInstall.PluginInBuild, "discord: connect again");
+                Check(read(System.IO.Path.Combine(bak, "renderer.js")) == "official vencord", "discord: connecting again keeps the backup");
+                Check(DiscordInstall.Uninstall() == null, "discord: disconnect from Vencord");
+                Check(read(System.IO.Path.Combine(dist, "renderer.js")) == "official vencord" && !System.IO.Directory.Exists(bak) && !DiscordInstall.Installed && read(System.IO.Path.Combine(res, "app.asar")) == "vencord stub", "discord: the official Vencord is back");
+
+                // 3) Подключала kapsula.txt (отметка без подписи core.txt): узнаётся и снимается
+                System.IO.Directory.Delete(System.IO.Path.Combine(roam, "Vencord"), true);
+                System.IO.File.Delete(System.IO.Path.Combine(res, "app.asar"));
+                fill(dist, "// kapsula build \"Kapsula\"" + new string(' ', 120));
+                System.IO.File.WriteAllBytes(System.IO.Path.Combine(res, "app.asar"), stub);
+                System.IO.File.WriteAllText(DiscordInstall.Marker, "Kapsula · 2026-05-01T10:00:00\r\nvencord=kapsula\r\ninjected=" + res + "\r\n");
+                AppOps.Refresh(entry, st);
+                Check(st.Installed && !st.Lost, "discord: a connection made by kapsula.txt counts as connected");
+                Check(DiscordInstall.Uninstall() == null && discordAsWas() && !System.IO.File.Exists(System.IO.Path.Combine(dist, "renderer.js")) && !DiscordInstall.Installed, "discord: a connection made by kapsula.txt is undone");
+                // …и поверх чужого Vencord, с отметкой самых первых версий (одно слово в первой строке)
+                System.IO.File.Move(System.IO.Path.Combine(res, "app.asar"), System.IO.Path.Combine(res, "_app.asar"));
+                System.IO.File.WriteAllBytes(System.IO.Path.Combine(res, "app.asar"), stub);
+                fill(bak, "official vencord");
+                fill(dist, "// kapsula build \"Kapsula\"" + new string(' ', 120));
+                System.IO.File.WriteAllText(DiscordInstall.Marker, "Kapsula\r\nvencord=before\r\ninjected=" + res + "\r\n");
+                Check(DiscordInstall.Uninstall() == null && discordAsWas() && read(System.IO.Path.Combine(dist, "renderer.js")) == "official vencord" && !System.IO.Directory.Exists(bak) && !DiscordInstall.Installed, "discord: kapsula.txt over Vencord — the previous Vencord comes back");
+                System.IO.Directory.Delete(System.IO.Path.Combine(roam, "Vencord"), true);
+
+                // 4) Discord держит app.asar: не вышло — после попытки ничего не осталось
+                using (var lk = new System.IO.FileStream(System.IO.Path.Combine(res, "app.asar"), System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read))
+                    Check(DiscordInstall.Install() == DiscordInstall.NeedClose, "discord: a busy Discord asks to be closed");
+                Check(!System.IO.Directory.Exists(System.IO.Path.Combine(roam, "Vencord")) && discordAsWas(), "discord: after a failed attempt nothing is left");
+
+                // 5) BetterDiscord — отказ, ничего не меняется; Discord не найден — тоже
+                System.IO.Directory.CreateDirectory(System.IO.Path.Combine(roam, "BetterDiscord"));
+                Check(DiscordInstall.Install() == "у вас стоит BetterDiscord — вместе с Vencord он не уживается", "discord: refuses next to BetterDiscord");
+                Check(!System.IO.Directory.Exists(System.IO.Path.Combine(roam, "Vencord")) && discordAsWas(), "discord: next to BetterDiscord nothing is touched");
+                System.IO.Directory.Delete(System.IO.Path.Combine(roam, "BetterDiscord"));
+                Environment.SetEnvironmentVariable(DiscordInstall.TestLocal, System.IO.Path.Combine(tmp, "nowhere"));
+                Check(DiscordInstall.Install() == "Discord не найден", "discord: no Discord — says so");
+                Check(DiscordInstall.Uninstall() == null, "discord: disconnecting what is not connected does nothing");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(DiscordInstall.TestRoaming, null);
+                Environment.SetEnvironmentVariable(DiscordInstall.TestLocal, null);
+                Environment.SetEnvironmentVariable(DiscordInstall.TestBuild, null);
+                try { System.IO.Directory.Delete(tmp, true); } catch { }
+            }
+        }
+
         static void Checks()
         {
             Check(State.FilePath.StartsWith(System.IO.Path.GetTempPath(), StringComparison.OrdinalIgnoreCase), "the self-test keeps its state in a temporary folder");
@@ -311,6 +432,8 @@ namespace DevTxt.Core
                 string ux, ua;
                 Check(AppOps.SplitCommand("\"C:\\P\\Uninstall Aura.exe\" /currentuser /S", out ux, out ua) && ux == "C:\\P\\Uninstall Aura.exe" && ua == "/currentuser /S", "an uninstall command is split into the program and its arguments");
             }
+
+            DiscordChecks();
 
             // Набор (тема и плагин для Steam): принимается только в папку Steam и раскладывается строго по своим местам
             {

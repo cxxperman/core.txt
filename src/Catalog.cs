@@ -23,6 +23,10 @@ namespace DevTxt.Core
         // «Набор»: архив из релиза, который раскладывается по папкам другой программы (тема и плагин для Steam)
         public bool IsBundle { get { return Kind == "bundle"; } }
         public string Connect;          // для подключения: команда хаба приложению Via, которая его выполняет
+        // Для подключения: что core.txt подключает сам, без другого приложения. Знакомо только «discord» (DiscordInstall);
+        // незнакомое значение не берётся — запись остаётся обычным подключением
+        public string Connector;
+        public bool IsConnector { get { return IsIntegration && Connector != null; } }
         public string Requires, RequiresHint;   // для набора: папка, без которой ставить некуда, и что сказать, если её нет
         public List<BundleTarget> Targets = new List<BundleTarget>();
         public bool HasExe { get { return Kind == "portable" || Kind == "installer"; } }
@@ -157,8 +161,11 @@ namespace DevTxt.Core
                 if (a.Connect != null && !SafeCommand.IsMatch(a.Connect)) a.Connect = null;
                 a.Requires = Json.Str(d, "requires");
                 a.RequiresHint = Json.Str(d, "requiresHint");
+                a.Connector = Json.Str(d, "connector");
+                if (a.Connector != "discord") a.Connector = null;
                 if (a.Kind == "integration")
                 {
+                    // Подключение core.txt делает само — через другое приложение (via) ему идти не нужно
                     if (string.IsNullOrEmpty(a.Marker)) continue;
                 }
                 else if (a.Kind == "bundle")

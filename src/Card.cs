@@ -34,6 +34,8 @@ namespace DevTxt.Core
         readonly TextBlock removeLink;
         readonly StackPanel removeRow;
         bool confirming, withData;
+        // Maska: на нажатой кнопке было написано «Закрыть Discord и …» — значит, Discord закрываем и потом запускаем снова
+        public bool CloseFirst;
         // Что было в прошлый раз — чтобы отметить движением то, что изменилось
         bool drawn, wasBusy, wasInstalled;
         string wasError;
@@ -81,8 +83,9 @@ namespace DevTxt.Core
             Second.Root.Margin = new Thickness(0, 0, 8, 0);
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Children = { Second.Root, Main.Root } };
 
-            // «Удалить» — тихая ссылка в углу: редкое действие не должно спорить с главной кнопкой
-            removeLink = Ui.T("Удалить", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
+            // «Удалить» — тихая ссылка в углу: редкое действие не должно спорить с главной кнопкой.
+            // У подключения, которое core.txt делает сам (Maska), на её месте — «Отключить», с тем же вопросом
+            removeLink = Ui.T(app.IsConnector ? "Отключить" : "Удалить", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
             removeLink.HorizontalAlignment = HorizontalAlignment.Left; removeLink.VerticalAlignment = VerticalAlignment.Bottom;
             removeLink.Margin = new Thickness(0, 0, 0, 7); removeLink.Cursor = System.Windows.Input.Cursors.Hand; removeLink.Background = Brushes.Transparent;
             removeLink.MouseEnter += delegate { removeLink.Foreground = Ui.Label; };
@@ -162,13 +165,23 @@ namespace DevTxt.Core
             Second.Hide();
             if (!S.Installed || busy) confirming = false;
             Motion.Show(removeRow, confirming && App.Data != null);
-            removeLink.Visibility = S.Installed && !busy && !confirming && App.Removable ? Visibility.Visible : Visibility.Collapsed;
+            removeLink.Visibility = S.Installed && !busy && !confirming && (App.Removable || App.IsConnector) ? Visibility.Visible : Visibility.Collapsed;
+            // Discord закрываем только по кнопке, на которой так и написано: что на ней сейчас, то и сделаем
+            bool closeDiscord = App.IsConnector && S.Running;
 
             if (S.Phase == Phase.Removing)
             {
-                text = "Удаляется…";
+                text = App.IsConnector ? "Отключается…" : "Удаляется…";
                 dotColor = Tokens.Palette.Red;
-                Main.Set("Удаление…", null, false, null);
+                Main.Set(App.IsConnector ? "Отключение…" : "Удаление…", null, false, null);
+            }
+            else if (confirming && App.IsConnector)
+            {
+                text = "Отключить " + App.Name.ToLowerInvariant() + ".txt от Discord?";
+                dotColor = Tokens.Palette.Red;
+                hint = "Discord вернётся к тому, что было до подключения";
+                Main.Set(closeDiscord ? "Закрыть Discord и отключить" : "Отключить", Tokens.Palette.Red, true, delegate { confirming = false; CloseFirst = closeDiscord; if (Remove != null) Remove(this, false); });
+                Second.Set("Отмена", null, true, delegate { confirming = false; if (Changed != null) Changed(); });
             }
             else if (confirming)
             {
@@ -184,6 +197,41 @@ namespace DevTxt.Core
                 text = "В разработке";
                 hint = App.IsIntegration ? "" : "Появится здесь, когда выйдет первая версия";
                 Main.Hide();
+            }
+            else if (App.IsConnector)
+            {
+                // Maska: core.txt подключает её к Discord сам (DiscordInstall)
+                if (S.Phase == Phase.Installing)
+                {
+                    text = "Подключается…";
+                    dotColor = App.Color;
+                    Main.Set("Подключение…", null, false, null);
+                }
+                else
+                {
+                    Action go = delegate { CloseFirst = closeDiscord; connect(this); };
+                    if (!S.Installed)
+                    {
+                        text = "Не подключено";
+                        hint = S.Note ?? (closeDiscord ? "Discord закроется и запустится снова" : "Ставит в Discord сборку Vencord с нашим плагином");
+                        Main.Set(closeDiscord ? "Закрыть Discord и подключить" : "Подключить", Ui.Accent, true, go);
+                    }
+                    else if (S.Lost)
+                    {
+                        // Отметка есть, а плагина в сборке нет: Vencord, видимо, переустановили — ставим нашу поверх
+                        text = "Плагин пропал из Discord";
+                        dotColor = Tokens.Palette.Orange;
+                        hint = "Видимо, Vencord переустановили";
+                        Main.Set(closeDiscord ? "Закрыть Discord и подключить" : "Подключить заново", Ui.Accent, true, go);
+                    }
+                    else
+                    {
+                        text = "Подключено";
+                        dotColor = Tokens.Palette.Green;
+                        hint = S.Note ?? "";
+                        Main.Hide();
+                    }
+                }
             }
             else if (App.IsIntegration)
             {

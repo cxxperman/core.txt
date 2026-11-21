@@ -63,6 +63,18 @@ namespace DevTxt.Core
             }
         }
 
+        // Небольшой файл целиком, в память (сборка Vencord для Maska)
+        public static byte[] GetBytes(string url)
+        {
+            using (var rs = Request(url).GetResponse())
+            using (var input = rs.GetResponseStream())
+            using (var ms = new MemoryStream())
+            {
+                input.CopyTo(ms);
+                return ms.ToArray();
+            }
+        }
+
         public static bool AssetMatches(string pattern, string name)
         {
             return Regex.IsMatch(name, "^" + Regex.Escape(pattern).Replace(@"\*", ".*") + "$", RegexOptions.IgnoreCase);

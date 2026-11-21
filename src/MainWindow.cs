@@ -562,11 +562,47 @@ namespace DevTxt.Core
         // Подключение (Maska для Discord): его выполняет другое приложение по команде хаба, ответ придёт результатом
         void Connect(Card c)
         {
-            if (DemoMode || c.App.Connect == null || c.App.Via == null) return;
+            if (DemoMode) return;
+            if (c.App.IsConnector) { Discord(c, false); return; }
+            if (c.App.Connect == null || c.App.Via == null) return;
             SendCommand(c.App.Via, c.App.Connect, new Dictionary<string, object>());
             RenderAll();
         }
 
+        // Maska: «Подключить» (off == false) или «Отключить» — core.txt делает это сам, в фоне. На кнопке было
+        // «Закрыть Discord и …» (c.CloseFirst) — закрываем Discord, делаем и запускаем те же Discord снова
+        async void Discord(Card c, bool off)
+        {
+            if (c.S.Phase != Phase.Idle || DemoMode) return;
+            var app = c.App;
+            bool close = c.CloseFirst;
+            c.CloseFirst = false;
+            c.S.Clear();
+            c.S.Note = null;
+            c.S.Phase = off ? Phase.Removing : Phase.Installing;
+            RenderAll();
+            string err = null;
+            bool restarted = false;
+            await Task.Run(delegate
+            {
+                List<string> closed = close ? DiscordInstall.CloseDiscord() : null;
+                try { err = off ? DiscordInstall.Uninstall() : DiscordInstall.Install(); }
+                catch (Exception e) { err = Errors.Lower(Errors.Short(e)); }
+                restarted = closed != null && closed.Count > 0;
+                DiscordInstall.StartDiscord(closed);   // закрывали сами — запускаем снова, даже если не вышло
+            });
+            c.S.Phase = Phase.Idle;
+            AppOps.Refresh(app, c.S);
+            string name = app.Name.ToLowerInvariant() + ".txt";
+            if (err == DiscordInstall.NeedClose) c.S.Error = "Discord открыт (может быть, только в трее у часов) — нажмите «Закрыть Discord и " + (off ? "отключить" : "подключить") + "»";
+            else if (err != null) c.S.Error = "Не вышло: " + (err.Trim().TrimEnd('.', ' ').Length > 0 ? err.Trim().TrimEnd('.', ' ') : "что-то пошло не так");
+            else if (off) c.S.Note = restarted ? "Отключено — Discord запущен снова" : "Отключено — перезапустите Discord";
+            else c.S.Note = restarted ? "Готово — Discord запущен снова" : "Готово — перезапустите Discord";
+            RenderAll();
+            // Окно спрятано — чем кончилось, скажет уведомление
+            if (c.S.Error != null) Notify(off ? "Не удалось отключить " + name : "Не удалось подключить " + name, c.S.Error, "apps");
+            else Notify(name + (off ? " отключено" : " подключено"), c.S.Note, "apps");
+        }
         // Общий вид меняется здесь: accent — "#RRGGBB", "" (свой у каждого) или null (не менять)
         internal void SetTheme(string accent, bool? reduced)
         {
@@ -996,6 +1032,7 @@ namespace DevTxt.Core
         async void RemoveApp(Card c, bool withData)
         {
             if (c.S.Phase != Phase.Idle || DemoMode) return;
+            if (c.App.IsConnector) { Discord(c, true); return; }   // у Maska «Отключить» на месте «Удалить»
             var app = c.App;
             c.S.Clear();
             c.S.Phase = Phase.Removing;
@@ -1047,7 +1084,15 @@ namespace DevTxt.Core
             {
                 if (c.App.Id == "kapsula") { c.S.Path = "demo"; c.S.Version = new Version(0, 7, 5); c.S.Running = true; c.S.Latest = new Release { Version = new Version(0, 7, 6) }; }
                 else if (c.App.Id == "aura") { c.S.Path = "demo"; c.S.Version = new Version(0, 26, 2); c.S.Running = true; }
-                else if (c.App.Id == "maska") c.S.Path = "demo";
+                else if (c.App.Id == "maska")
+                {
+                    // Снимки карточки Maska: CORE_DEMO_DISCORD — off, lost, busy; с «-running» Discord ещё и запущен
+                    string dd = Environment.GetEnvironmentVariable("CORE_DEMO_DISCORD") ?? "";
+                    c.S.Path = dd.StartsWith("off") ? null : "demo";
+                    c.S.Lost = dd.StartsWith("lost");
+                    c.S.Running = dd.EndsWith("-running");
+                    if (dd.StartsWith("busy")) c.S.Phase = Phase.Installing;
+                }
                 else if (c.App.Id == "dock" || c.App.Id == "smena") { c.S.Path = "demo"; c.S.Version = new Version(0, 1, 2); c.S.Running = true; }
             }
             // То, что Kapsula присылает на самом деле (см. её CoreHub.cs), здесь — часть списка

@@ -22,6 +22,10 @@ namespace DevTxt.Core
         public double Progress;
         public long Done, Total;     // сколько байт скачано и сколько всего
         public DateTime LaunchUntil; // «Открыть» нажали: до этого времени ждём, пока приложение появится среди запущенных
+        // Подключение, которое core.txt делает сам (Maska): отметка есть, а нашего плагина в Discord уже нет, и чем
+        // кончилось последнее «Подключить» или «Отключить», если всё получилось. Running у него — запущен ли Discord
+        public bool Lost;
+        public string Note;
 
         public bool Launching { get { return !Running && LaunchUntil > DateTime.UtcNow; } }
         public void Fail(Exception e) { Error = Errors.Short(e); ErrorDetail = Errors.Detail(e); }
@@ -451,6 +455,14 @@ namespace DevTxt.Core
         // Смотрит на диск и на список процессов. Сеть не трогает.
         public static void Refresh(AppEntry app, AppStatus s)
         {
+            if (app.IsConnector)
+            {
+                // Maska: подключена ли (отметка на месте), цел ли плагин в сборке и запущен ли сейчас Discord
+                s.Path = DiscordInstall.Installed ? DiscordInstall.Marker : null;
+                s.Lost = s.Path != null && !DiscordInstall.PluginInBuild;
+                s.Running = DiscordInstall.Running();
+                return;
+            }
             if (app.IsIntegration)
             {
                 string marker = Expand(app.Marker);

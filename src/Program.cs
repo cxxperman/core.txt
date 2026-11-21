@@ -235,6 +235,46 @@ namespace DevTxt.Core
                 Check(AppOps.ReplacePath("\"c:\\old\\Kapsula.exe\" --wait", "C:\\Old\\Kapsula.exe", "D:\\new\\Kapsula.exe") == "\"D:\\new\\Kapsula.exe\" --wait", "an autostart entry follows the program to its new place");
             }
 
+            // Временная папка: пробная сборка оттуда — не установленное приложение, core.txt её не запоминает и не запускает
+            {
+                AppOps.TempOverride = @"C:\Fake\Temp\";
+                try
+                {
+                    Check(AppOps.InTemp(@"C:\Fake\Temp\a\Smena.exe"), "a file inside the temporary folder is noticed");
+                    Check(!AppOps.InTemp(@"C:\Fake\Temp2\Smena.exe"), "a sibling folder with the same prefix is not the temporary folder");
+                    Check(!AppOps.InTemp(@"C:\Fake\Programs\Smena.exe"), "a file elsewhere is not in the temporary folder");
+                    Check(!AppOps.InTemp(null) && !AppOps.InTemp(""), "an empty path is not in the temporary folder");
+                }
+                finally { AppOps.TempOverride = null; }
+
+                string pid = System.Diagnostics.Process.GetCurrentProcess().Id.ToString();
+                string tdir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-temp-" + pid);
+                string thome = tdir + "-home";
+                try
+                {
+                    System.IO.Directory.CreateDirectory(tdir);
+                    string texe = System.IO.Path.Combine(tdir, "One.exe");
+                    System.IO.File.WriteAllText(texe, "app");
+                    var one = new AppEntry { Id = "selftest-temp", Name = "One", Kind = "portable", Exe = "One.exe", Process = "CoreTxtNoSuchProcess" };
+                    State.Paths["selftest-temp"] = texe;
+                    AppOps.HomeOverride = System.IO.Path.Combine(thome, "dev.txt");
+                    var st = new AppStatus();
+                    AppOps.Refresh(one, st);
+                    Check(st.Path == null, "a program remembered inside the temporary folder is not taken as installed");
+                    Check(!State.Paths.ContainsKey("selftest-temp"), "the remembered path in the temporary folder is dropped");
+                    bool launched = false;
+                    try { AppOps.Launch(texe); launched = true; } catch { }
+                    Check(!launched, "a program from the temporary folder is not launched");
+                }
+                finally
+                {
+                    AppOps.HomeOverride = null;
+                    State.Paths.Remove("selftest-temp");
+                    try { System.IO.Directory.Delete(tdir, true); } catch { }
+                    try { System.IO.Directory.Delete(thome, true); } catch { }
+                }
+            }
+
             // Удаление: программа уходит вместе с пустой папкой; настройки — только по просьбе и только из профиля
             {
                 string home = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-remove-" + System.Diagnostics.Process.GetCurrentProcess().Id);

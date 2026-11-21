@@ -120,6 +120,48 @@ namespace DevTxt.Core
             get { return HomeOverride ?? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "dev.txt"); }
         }
 
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint size);
+
+        // Полный путь в длинном виде: «C:\Users\MAYLI~1\...» превращается в «C:\Users\mayli\...». Не вышло — просто полный путь.
+        static string LongFull(string path)
+        {
+            string full = System.IO.Path.GetFullPath(path);
+            try
+            {
+                var sb = new System.Text.StringBuilder(1024);
+                uint n = GetLongPathName(full, sb, (uint)sb.Capacity);
+                if (n > 0 && n < sb.Capacity) return sb.ToString();
+            }
+            catch { }
+            return full;
+        }
+
+        // Лежит ли путь внутри папки; граница по разделителю, чтобы «C:\Temp2» не считалась частью «C:\Temp»
+        static bool InsideDir(string path, string dir)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(dir)) return false;
+                string d = LongFull(dir).TrimEnd('\\', '/') + "\\";
+                return LongFull(path).StartsWith(d, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        public static string TempOverride;   // для проверок
+        // Файл во временной папке — пробная сборка или распакованный архив, а не установленное приложение
+        public static bool InTemp(string path)
+        {
+            return InsideDir(path, TempOverride ?? System.IO.Path.GetTempPath());
+        }
+
+        // Путь годится как место установленного приложения: не во временной папке (если только это не наш общий дом)
+        static bool Trusted(string path)
+        {
+            return !InTemp(path) || InsideDir(path, Home);
+        }
+
         public static string DefaultPath(AppEntry app)
         {
             if (app.Kind == "installer") return Expand(app.Installed);
@@ -389,7 +431,8 @@ namespace DevTxt.Core
             foreach (var p in Process.GetProcessesByName(app.Process))
             {
                 running = true;
-                try { if (found == null) found = p.MainModule.FileName; } catch { }
+                // Среди одноимённых процессов берём тот, чей путь годится; пробная сборка из временной папки не в счёт
+                try { if (found == null) { string f = p.MainModule.FileName; if (Trusted(f)) found = f; } } catch { }
                 p.Dispose();
             }
             return found;
@@ -432,10 +475,15 @@ namespace DevTxt.Core
             bool running;
             string live = RunningPath(app, out running);
             s.Running = running;
+            // Пробные сборки во временной папке — не установленное приложение: ни запущенную оттуда, ни запомненную раньше не берём
+            if (live != null && !Trusted(live)) live = null;
             string saved;
             State.Paths.TryGetValue(app.Id, out saved);
+            if (saved != null && !Trusted(saved)) { State.Paths.Remove(app.Id); State.Save(); saved = null; }
+            string auto = AutostartPath(app);
+            if (auto != null && !Trusted(auto)) auto = null;
             string found = null;
-            foreach (string c in new string[] { live, saved, DefaultPath(app), AutostartPath(app), LegacyPath(app) })
+            foreach (string c in new string[] { live, saved, DefaultPath(app), auto, LegacyPath(app) })
                 if (!string.IsNullOrEmpty(c) && File.Exists(c)) { found = c; break; }
             s.Path = found;
             s.Version = found != null ? FileVersion(found) : null;
@@ -484,6 +532,7 @@ namespace DevTxt.Core
 
         public static void Launch(string path)
         {
+            if (!Trusted(path)) throw new Exception("Программа лежит во временной папке — запускать её оттуда нельзя");
             Process.Start(new ProcessStartInfo(path) { WorkingDirectory = System.IO.Path.GetDirectoryName(path), UseShellExecute = true });
         }
 

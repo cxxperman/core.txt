@@ -989,10 +989,14 @@ namespace DevTxt.Core
         {
             if (c.S.Phase != Phase.Idle || DemoMode) return;
             var app = c.App;
+            bool close = c.CloseFirst;   // на кнопке было «Закрыть Steam и …»
+            c.CloseFirst = false;
             c.S.Clear();
+            c.S.Note = null;
             c.S.Progress = 0; c.S.Done = 0; c.S.Total = 0;
             c.S.Phase = Phase.Downloading;
             RenderAll();
+            if (app.IsBundle) { InstallBundle(c, close); return; }
             try
             {
                 if (c.S.Latest == null)
@@ -1016,6 +1020,56 @@ namespace DevTxt.Core
             // Окно спрятано — о готовой установке скажет уведомление Windows
             if (c.S.Error == null && c.S.Installed) Notify(app.Name.ToLowerInvariant() + ".txt установлено", "Открыть можно из core.txt или из меню «Пуск»", "apps");
             else if (c.S.Error != null) Notify("Не удалось установить " + app.Name.ToLowerInvariant() + ".txt", c.S.Error, "apps");
+        }
+
+        // Набор для Steam: скачать, закрыть Steam (если на кнопке так и было написано), разложить файлы, включить тему и
+        // плагин в Millennium и запустить Steam снова. Всё, что трогает диск и процессы, — в фоне
+        async void InstallBundle(Card c, bool close)
+        {
+            var app = c.App;
+            bool update = c.S.Installed, restarted = false;
+            List<string> disabled = null;
+            Probe after = null;
+            try
+            {
+                if (c.S.Latest == null)
+                {
+                    Release found = await Task.Run(delegate { return Releases.Latest(app); });
+                    if (found == null) throw new Exception("В релизах пока нет файла для установки");
+                    c.S.Latest = found; State.Latest[app.Id] = found; State.Save();
+                }
+                Release r = c.S.Latest;
+                Action<long, long> progress = delegate(long done, long total) { Dispatcher.BeginInvoke(new Action(delegate { c.S.Done = done; c.S.Total = total; c.S.Progress = total > 0 ? (double)done / total : 0; if (c.S.Phase == Phase.Downloading) { c.Render(Install, Open, Find, Connect, Connected); RenderWelcome(); } })); };
+                string file = await Task.Run(delegate { return Releases.Download(r, app.Id, progress); });
+                c.S.Phase = Phase.Installing;
+                if (close) c.S.Note = "Закрывается Steam…";
+                RenderAll();
+                Action closed = delegate { Dispatcher.BeginInvoke(new Action(delegate { c.S.Note = null; RenderAll(); })); };   // дальше — «Устанавливается…»
+                await Task.Run(delegate
+                {
+                    try { restarted = Steam.Around(close, closed, delegate { disabled = AppOps.InstallBundle(app, c.S, file); }); }
+                    finally { after = LookNow(app); }
+                });
+            }
+            catch (Exception e) { c.S.Fail(e is SteamOpen ? new Exception("Steam запущен — нажмите «Закрыть Steam и " + (update ? "обновить" : "установить") + "»") : e); }
+            if (after == null) after = await Task.Run(delegate { return LookNow(app); });
+            c.S.Phase = Phase.Idle;
+            if (after != null) AppOps.Apply(app, c.S, after);
+            InstalledApps.Sync(app, c.S);
+            string name = app.Name.ToLowerInvariant() + ".txt";
+            if (c.S.Error == null)
+                c.S.Note = (restarted ? "Готово — Steam запущен снова" : "Готово — запустите Steam")
+                    + (disabled != null && disabled.Count > 0 ? " · Отключены: " + string.Join(", ", disabled.ToArray()) : "");
+            else c.S.Note = null;
+            RenderAll();
+            if (c.S.Error == null) Notify(name + (update ? " обновлено" : " установлено"), c.S.Note, "apps");
+            else Notify(c.S.Installed && c.S.Error == Millennium.EnableFailed ? name + " установлено не до конца" : "Не удалось установить " + name, c.S.Error, "apps");
+        }
+
+        // Состояние карточки сразу после действия — обходит диск и процессы, поэтому зовётся в фоне
+        static Probe LookNow(AppEntry app)
+        {
+            try { return AppOps.Look(app, null, ProcSnap.Take(AppOps.ProcessNames(new AppEntry[] { app }))); } catch { return null; }
         }
 
         // Уведомление — только когда окна core.txt не видно: при открытом окне всё и так на экране.
@@ -1066,9 +1120,35 @@ namespace DevTxt.Core
             if (c.S.Phase != Phase.Idle || DemoMode) return;
             if (c.App.IsConnector) { Discord(c, true); return; }   // у Maska «Отключить» на месте «Удалить»
             var app = c.App;
+            bool close = c.CloseFirst;
+            c.CloseFirst = false;
             c.S.Clear();
+            c.S.Note = null;
             c.S.Phase = Phase.Removing;
+            if (app.IsBundle && close) c.S.Note = "Закрывается Steam…";
             RenderAll();
+            if (app.IsBundle)
+            {
+                // Набор: Steam закрываем по кнопке «Закрыть Steam и удалить», настройки Millennium возвращаем и запускаем Steam снова
+                bool restarted = false;
+                Probe after = null;
+                Action closed = delegate { Dispatcher.BeginInvoke(new Action(delegate { c.S.Note = null; RenderAll(); })); };
+                try
+                {
+                    await Task.Run(delegate
+                    {
+                        try { restarted = Steam.Around(close, closed, delegate { AppOps.Uninstall(app, c.S, withData); }); }
+                        finally { after = LookNow(app); }
+                    });
+                }
+                catch (Exception e) { c.S.Fail(e is SteamOpen ? new Exception("Steam запущен — нажмите «Закрыть Steam и удалить»") : e); }
+                c.S.Phase = Phase.Idle;
+                if (after != null) AppOps.Apply(app, c.S, after);
+                c.S.Note = c.S.Error == null ? (restarted ? "Удалено — Steam запущен снова" : "Удалено") : null;
+                InstalledApps.Sync(app, c.S);
+                RenderAll();
+                return;
+            }
             try { await Task.Run(delegate { AppOps.Uninstall(app, c.S, withData); }); }
             catch (Exception e) { c.S.Fail(e); }
             c.S.Phase = Phase.Idle;
@@ -1124,6 +1204,16 @@ namespace DevTxt.Core
                     c.S.Lost = dd.StartsWith("lost");
                     c.S.Running = dd.EndsWith("-running");
                     if (dd.StartsWith("busy")) c.S.Phase = Phase.Installing;
+                }
+                else if (c.App.Id == "arkada")
+                {
+                    // Снимки карточки Arkada: CORE_DEMO_ARKADA — running (Steam запущен), nohost (нет Millennium), closing, done, update-running
+                    string da = Environment.GetEnvironmentVariable("CORE_DEMO_ARKADA") ?? "";
+                    c.S.Running = da.EndsWith("running");
+                    c.S.NoHost = da == "nohost";
+                    if (da == "closing") { c.S.Phase = Phase.Installing; c.S.Note = "Закрывается Steam…"; }
+                    if (da == "done") { c.S.Path = "demo"; c.S.Version = new Version(0, 3, 0); c.S.Note = "Готово — Steam запущен снова · Отключены: size-on-disk, steam-share"; }
+                    if (da == "update-running") { c.S.Path = "demo"; c.S.Version = new Version(0, 2, 0); c.S.Latest = new Release { Version = new Version(0, 3, 0) }; }
                 }
                 else if (c.App.Id == "dock" || c.App.Id == "smena") { c.S.Path = "demo"; c.S.Version = new Version(0, 1, 2); c.S.Running = true; }
             }

@@ -168,10 +168,12 @@ namespace DevTxt.Core
             removeLink.Visibility = S.Installed && !busy && !confirming && (App.Removable || App.IsConnector) ? Visibility.Visible : Visibility.Collapsed;
             // Discord закрываем только по кнопке, на которой так и написано: что на ней сейчас, то и сделаем
             bool closeDiscord = App.IsConnector && S.Running;
+            // Набор для Steam — так же: Steam запущен — на кнопке сказано, что он закроется (и потом запустится снова)
+            bool closeSteam = App.IsBundle && S.Running;
 
             if (S.Phase == Phase.Removing)
             {
-                text = App.IsConnector ? "Отключается…" : "Удаляется…";
+                text = App.IsBundle && S.Note != null ? S.Note : App.IsConnector ? "Отключается…" : "Удаляется…";   // у набора сначала «Закрывается Steam…»
                 dotColor = Tokens.Palette.Red;
                 Main.Set(App.IsConnector ? "Отключение…" : "Удаление…", null, false, null);
             }
@@ -187,8 +189,8 @@ namespace DevTxt.Core
             {
                 text = "Удалить " + App.Name.ToLowerInvariant() + ".txt с этого компьютера?";
                 dotColor = Tokens.Palette.Red;
-                if (App.Data == null) hint = App.IsBundle ? "Папки темы и плагина будут убраны из Steam" : "Настройки останутся на месте";
-                Main.Set("Удалить", Tokens.Palette.Red, true, delegate { bool data = withData; confirming = false; if (Remove != null) Remove(this, data); });
+                if (App.Data == null) hint = App.IsBundle ? "Тема и плагин уйдут из Steam, вернётся прежняя тема" : "Настройки останутся на месте";
+                Main.Set(closeSteam ? "Закрыть Steam и удалить" : "Удалить", Tokens.Palette.Red, true, delegate { bool data = withData; confirming = false; CloseFirst = closeSteam; if (Remove != null) Remove(this, data); });
                 Second.Set("Отмена", null, true, delegate { confirming = false; if (Changed != null) Changed(); });
             }
             else if (App.Soon && !S.Installed)
@@ -253,29 +255,36 @@ namespace DevTxt.Core
             }
             else if (S.Phase == Phase.Installing)
             {
-                text = "Устанавливается…";
+                text = App.IsBundle && S.Note != null ? S.Note : "Устанавливается…";
                 dotColor = App.Color;
                 Main.Set(S.Installed ? "Обновление…" : "Установка…", null, false, null);
             }
             else if (!S.Installed)
             {
                 text = S.Latest != null ? "Не установлено · версия " + V(S.Latest.Version) : "Не установлено";
-                Main.Set("Установить", Ui.Accent, true, delegate { install(this); });
+                if (App.IsBundle && S.NoHost)
+                {
+                    // Без Millennium ставить некуда: говорим, что нужно, и даём открыть его сайт — ставит его человек сам
+                    hint = App.RequiresHint ?? "";
+                    Second.Set("Открыть steambrew.app", null, true, delegate { Steam.OpenMillenniumSite(); });
+                }
+                else if (App.IsBundle) hint = S.Note ?? (closeSteam ? "Steam закроется и запустится снова" : "");
+                Main.Set(closeSteam ? "Закрыть Steam и установить" : "Установить", Ui.Accent, true, delegate { CloseFirst = closeSteam; install(this); });
             }
             else
             {
-                text = (S.Version != null ? "Версия " + V(S.Version) : "Установлено") + (S.Running ? " · запущено" : S.Launching ? " · запускается…" : "");
+                text = (S.Version != null ? "Версия " + V(S.Version) : "Установлено") + (S.Running && App.HasExe ? " · запущено" : S.Launching ? " · запускается…" : "");
                 if (!App.HasExe) dotColor = Tokens.Palette.Green;
                 if (S.Running) dotColor = Tokens.Palette.Green;
                 if (S.UpdateAvailable)
                 {
-                    hint = "Есть обновление " + V(S.Latest.Version) + (S.Running ? " — приложение перезапустится" : "");
+                    hint = "Есть обновление " + V(S.Latest.Version) + (S.Running ? (App.IsBundle ? " — Steam перезапустится" : " — приложение перезапустится") : "");
                     dotColor = Tokens.Palette.Orange;
-                    Main.Set("Обновить", Ui.Accent, true, delegate { install(this); });
+                    Main.Set(closeSteam ? "Закрыть Steam и обновить" : "Обновить", Ui.Accent, true, delegate { CloseFirst = closeSteam; install(this); });
                     if (App.HasExe) OpenButton(Second, this, "Открыть", open);
                 }
                 else if (App.HasExe) OpenButton(Main, this, "Открыть", open);
-                else { Main.Hide(); hint = App.Hint; }   // набор: открывать нечего, зато есть что сказать, как его включить
+                else { Main.Hide(); hint = S.Note ?? App.Hint; }   // набор: открывать нечего — чем кончилась установка, а потом подсказка из каталога
             }
 
             bool failed = S.Error != null && !busy;

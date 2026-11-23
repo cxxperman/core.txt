@@ -48,7 +48,7 @@
       "color": "#2A8FD8",
       "kind": "bundle",
       "marker": "{steam}\\millennium\\plugins\\arkada\\plugin.json",
-      "hint": "Включите плагин и тему Arkada в настройках Millennium и перезапустите Steam",
+      "hint": "Если тема не появилась — включите Arkada в настройках Millennium и перезапустите Steam",
       "sprite": [".####..####.", "############", "##E######E##", "#EEE####E#E#", "##E######E##", "############", "####....####", ".##......##."],
       "repo": "cxxperman/arkada.txt",
       "asset": "arkada.zip",

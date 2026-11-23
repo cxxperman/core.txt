@@ -291,6 +291,238 @@ namespace DevTxt.Core
             }
         }
 
+        // Разбор и правка JSON с сохранением текста: всё, кроме изменённого, остаётся байт в байт
+        static void JsonDocChecks()
+        {
+            string sample = "{\r\n  \"Подложка окна\": \"Размытие\",\r\n  \"n\": [1, 1.0, -0.5, 1e5, 2E-3, 12345678901234567890123],\r\n  \"esc\": \"\\u0041\\n\\\"\\\\\\/\",\r\n  \"z\": {}, \"e\": [],\r\n  \"b\": [true, false, null]\r\n}";
+            JsonDoc doc = null;
+            try { doc = JsonDoc.Parse(sample); } catch { }
+            Check(doc != null && doc.Result() == sample, "json: an unchanged document is written back byte for byte");
+            Check(doc != null && doc.Root.Keys.Count == 6 && doc.Root.Keys[0] == "Подложка окна" && doc.Root.Keys[5] == "b", "json: keys keep their order and Cyrillic");
+            Check(doc != null && doc.Get(doc.Root, "esc").Text == "A\n\"\\/", "json: escapes are read");
+            Check(doc != null && doc.Raw(doc.Get(doc.Root, "n").Items[1]) == "1.0" && doc.Raw(doc.Get(doc.Root, "n").Items[5]) == "12345678901234567890123", "json: numbers keep their exact text");
+            if (doc != null)
+            {
+                doc.Replace(doc.Get(doc.Root, "Подложка окна"), JsonDoc.Quote("Акрил \"x\""));
+                Check(doc.Result() == sample.Replace("\"Размытие\"", "\"Акрил \\\"x\\\"\""), "json: a replaced value changes only that value");
+            }
+            Check(JsonDoc.Quote("Тема\t\"a\"\\\n\u0001") == "\"Тема\\t\\\"a\\\"\\\\\\n\\u0001\"", "json: quoting escapes only what it must and keeps Cyrillic");
+            foreach (string bad in new string[] { "{", "{\"a\":}", "[1,]", "{\"a\":1} x", "01", "\"a\u0001\"", "{'a':1}", "{\"a\" 1}", "[1.]", "\"\\x\"", "", "tru" })
+            {
+                bool threw = false;
+                try { JsonDoc.Parse(bad); } catch { threw = true; }
+                Check(threw, "json: broken input is refused: " + bad);
+            }
+            // Новый ключ в объект с отступами — тем же отступом; в пустой — развёрнуто
+            var d2 = JsonDoc.Parse("{\n    \"a\": {},\n    \"b\": 1\n}");
+            d2.Add(d2.Root, "c", delegate(string ind) { return d2.ArrayText(new System.Collections.Generic.List<string> { "\"x\"" }, ind); });
+            d2.Add(d2.Get(d2.Root, "a"), "k", delegate(string ind) { return "2"; });
+            Check(d2.Result() == "{\n    \"a\": {\n        \"k\": 2\n    },\n    \"b\": 1,\n    \"c\": [\n        \"x\"\n    ]\n}", "json: added keys follow the document's indentation");
+        }
+
+        // Набор для Steam (Arkada) в один щелчок — только на поддельной папке Steam во временной директории: путь Steam
+        // подменяется CORE_TEST_STEAM, и настоящий Steam при этом не «запущен», не закрывается и не запускается
+        static void SteamChecks()
+        {
+            var utf = new System.Text.UTF8Encoding(false);
+            Check(BundleNames.FromManifest("{\"activeTheme\":\"../evil\",\"enablePlugin\":\"a b\",\"replaces\":[\"ok-1\",\"..\",\"x\\\\y\",5,\"arkada\",\"" + new string('a', 41) + "\"],\"installTo\":\"C:\\\\Windows\"}", "arkada").Theme == "arkada", "manifest: a theme name with a path is refused");
+            BundleNames bn = BundleNames.FromManifest("{\"activeTheme\":\"../evil\",\"enablePlugin\":\"a b\",\"replaces\":[\"ok-1\",\"..\",\"x\\\\y\",5,\"arkada\",\"" + new string('a', 41) + "\"]}", "arkada");
+            Check(bn.Plugin == "arkada" && bn.Replaces.Count == 1 && bn.Replaces[0] == "ok-1", "manifest: only safe names are taken, our own plugin is never «replaced»");
+            BundleNames bd = BundleNames.FromManifest("not json", "arkada");
+            Check(bd.Theme == "arkada" && bd.Plugin == "arkada" && bd.Replaces.Count == 0, "manifest: a broken manifest means the defaults");
+            BundleNames bg = BundleNames.FromManifest("{\"activeTheme\":\"Arkada.v2\",\"enablePlugin\":\"arkada_p\",\"replaces\":[\"size-on-disk\"]}", "arkada");
+            Check(bg.Theme == "Arkada.v2" && bg.Plugin == "arkada_p" && bg.Replaces[0] == "size-on-disk", "manifest: good names are taken");
+
+            AppEntry ark = Catalog.Apps.Find(delegate(AppEntry a) { return a.Id == "arkada"; });
+            Check(ark != null && ark.IsBundle, "steam: the built-in catalogue has the Arkada bundle");
+            if (ark == null) return;
+            string tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "core.txt-steam-" + System.Diagnostics.Process.GetCurrentProcess().Id);
+            string steam = System.IO.Path.Combine(tmp, "Steam"), mil = System.IO.Path.Combine(steam, "millennium");
+            string cfgDir = System.IO.Path.Combine(mil, "config"), cfg = System.IO.Path.Combine(cfgDir, "config.json"), backup = cfg + ".before-arkada";
+            string plug = System.IO.Path.Combine(mil, "plugins", "arkada"), theme = System.IO.Path.Combine(mil, "themes", "arkada");
+            string zip = System.IO.Path.Combine(tmp, "arkada.zip");
+            // Как настоящий config.json Millennium: CRLF, два пробела, русские ключи и значения, числа
+            Func<string, string, string> config = delegate(string active, string plugins)
+            {
+                return "{\r\n  \"general\": {\r\n    \"accentColor\": \"DEFAULT_ACCENT_COLOR\",\r\n    \"onMillenniumUpdate\": 2,\r\n    \"ratio\": 1.0,\r\n    \"big\": 12345678901234567890,\r\n    \"one\": 1\r\n  },\r\n"
+                    + "  \"plugins\": {\r\n    \"enabledPlugins\": " + plugins + "\r\n  },\r\n"
+                    + "  \"themes\": {\r\n    \"activeTheme\": \"" + active + "\",\r\n    \"allowedScripts\": true,\r\n    \"conditions\": {\r\n      \"arkada\": {\r\n        \"Подложка окна\": \"Размытие\",\r\n        \"«Что нового» на главной\": \"Показывать\"\r\n      },\r\n      \"Zehn\": {\r\n        \"Waifu Scale\": \"100\"\r\n      }\r\n    }\r\n  }\r\n}";
+            };
+            Func<string[], string> list = delegate(string[] names)
+            {
+                if (names.Length == 0) return "[]";
+                return "[\r\n      \"" + string.Join("\",\r\n      \"", names) + "\"\r\n    ]";
+            };
+            string original = config("Zehn", list(new string[] { "dotastats", "size-on-disk", "steam-share" }));
+            Action<string> makeZip = delegate(string manifest)
+            {
+                if (System.IO.File.Exists(zip)) System.IO.File.Delete(zip);
+                using (var fs = System.IO.File.Create(zip))
+                using (var z = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+                {
+                    var files = new System.Collections.Generic.Dictionary<string, string> { { "plugin/plugin.json", "{\"name\":\"arkada\",\"version\":\"0.3.0\"}" }, { "plugin/backend/main.lua", "x" }, { "theme/skin.json", "{}" } };
+                    if (manifest != null) files["manifest.json"] = manifest;
+                    foreach (var f in files) using (var w = new System.IO.StreamWriter(z.CreateEntry(f.Key).Open(), utf)) w.Write(f.Value);
+                }
+            };
+            Func<string, string> read = delegate(string p) { return System.IO.File.Exists(p) ? System.IO.File.ReadAllText(p, utf) : null; };
+            Func<string, byte[]> bytes = delegate(string p) { return System.IO.File.Exists(p) ? System.IO.File.ReadAllBytes(p) : null; };
+            Func<byte[], byte[], bool> same = delegate(byte[] a, byte[] b) { return a != null && b != null && System.Linq.Enumerable.SequenceEqual(a, b); };
+            var release = new Release { Version = new Version(0, 3, 0) };
+            const string manifestOk = "{\"activeTheme\":\"arkada\",\"enablePlugin\":\"arkada\",\"replaces\":[\"size-on-disk\",\"steam-share\",\"not-there\"],\"installTo\":\"C:\\\\Windows\\\\x\",\"keepFolders\":[\"..\"]}";
+            int starts = Steam.FakeStarts;
+            try
+            {
+                foreach (string d in new string[] { cfgDir, System.IO.Path.Combine(mil, "plugins", "dotastats"), System.IO.Path.Combine(mil, "plugins", "size-on-disk"), System.IO.Path.Combine(mil, "plugins", "steam-share"), System.IO.Path.Combine(mil, "themes", "Zehn") })
+                    System.IO.Directory.CreateDirectory(d);
+                System.IO.File.WriteAllText(cfg, original, utf);
+                Environment.SetEnvironmentVariable(Steam.TestDir, steam);
+                Environment.SetEnvironmentVariable(Steam.TestRunning, null);
+                Check(Steam.Dir() == steam && AppOps.Expand(ark.Marker).StartsWith(tmp, StringComparison.OrdinalIgnoreCase), "steam: the checks work in a fake Steam folder only");
+                Check(!Steam.Running() && !Steam.Running(ProcSnap.Take(new string[] { "steam" })), "steam: on a fake folder the real Steam does not count");
+
+                // 1) Установка: файлы на месте, тема и плагин включены, заменённые плагины отключены, остальное — байт в байт
+                makeZip(manifestOk);
+                var st = new AppStatus { Latest = release };
+                System.Collections.Generic.List<string> off = null;
+                try { off = AppOps.InstallBundle(ark, st, zip); } catch (Exception e) { Check(false, "steam: install threw " + e.Message + (e.InnerException != null ? " / " + e.InnerException.Message : "")); }
+                Check(System.IO.File.Exists(System.IO.Path.Combine(plug, "plugin.json")) && System.IO.File.Exists(System.IO.Path.Combine(plug, "backend", "main.lua")) && System.IO.File.Exists(System.IO.Path.Combine(theme, "skin.json")), "steam: bundle files are in place");
+                Check(!System.IO.File.Exists(System.IO.Path.Combine(plug, "manifest.json")) && !System.IO.Directory.Exists(System.IO.Path.Combine(tmp, "Windows")), "steam: the manifest decides no folders");
+                string installed = config("arkada", list(new string[] { "dotastats", "arkada" }));
+                Check(read(cfg) == installed, "steam: config.json — only the active theme and the plugin list changed");
+                Check(bytes(cfg) != null && bytes(cfg)[0] == (byte)'{', "steam: config.json is written without BOM");
+                Check(off != null && off.Count == 2 && off[0] == "size-on-disk" && off[1] == "steam-share", "steam: only the replaced plugins that were enabled are reported");
+                Check(read(backup) == original, "steam: the backup of config.json is the original");
+                var mem = Millennium.ReadMemory(plug);
+                Check(mem.Found && mem.Before == "Zehn" && mem.Plugin == "arkada" && mem.Theme == "arkada" && mem.Disabled.Count == 2, "steam: what was before is remembered");
+                var look = new AppStatus();
+                AppOps.Refresh(ark, look);
+                Check(look.Installed && look.Version == new Version(0, 3, 0) && !look.Running && !look.NoHost, "steam: the card sees it installed, Steam closed");
+                Check(!System.IO.File.Exists(cfg + ".core-tmp"), "steam: no temporary file is left");
+
+                // 2) Повторная установка (обновление): ничего не портит, резерв и «как было» не трогает, файл не переписывает
+                System.IO.File.WriteAllText(backup, "backup", utf);
+                DateTime written = System.IO.File.GetLastWriteTimeUtc(cfg);
+                System.IO.File.SetLastWriteTimeUtc(cfg, written.AddMinutes(-5));
+                written = System.IO.File.GetLastWriteTimeUtc(cfg);
+                makeZip(manifestOk);
+                off = AppOps.InstallBundle(ark, st, zip);
+                Check(read(cfg) == installed && System.IO.File.GetLastWriteTimeUtc(cfg) == written, "steam: installing again leaves a correct config.json alone");
+                Check(read(backup) == "backup" && off.Count == 0, "steam: installing again keeps the backup");
+                mem = Millennium.ReadMemory(plug);
+                Check(mem.Before == "Zehn" && mem.Disabled.Count == 2, "steam: installing again keeps what was before");
+
+                // 3) Версия: нет .core-version — из plugin.json
+                System.IO.File.Delete(System.IO.Path.Combine(plug, ".core-version"));
+                System.IO.File.WriteAllText(System.IO.Path.Combine(plug, "plugin.json"), "{\"name\":\"arkada\",\"version\":\"0.2.5\"}", utf);
+                AppOps.Refresh(ark, look);
+                Check(look.Installed && look.Version == new Version(0, 2, 5), "steam: without .core-version the version comes from plugin.json");
+
+                // 4) Удаление: прежняя тема и отключённые плагины вернулись, папок набора нет — config.json как до установки
+                System.IO.File.WriteAllText(backup, original, utf);
+                AppOps.Uninstall(ark, new AppStatus { Path = AppOps.Expand(ark.Marker) }, false);
+                Check(read(cfg) == original, "steam: removal brings back the previous theme and plugins, the rest byte for byte");
+                Check(!System.IO.Directory.Exists(plug) && !System.IO.Directory.Exists(theme), "steam: removal takes the bundle folders away");
+                Check(System.IO.File.Exists(backup), "steam: the backup stays after removal");
+
+                // 5) Steam открыт, а закрыть не просили — не трогаем ничего
+                Environment.SetEnvironmentVariable(Steam.TestRunning, "1");
+                makeZip(manifestOk);
+                bool open = false;
+                try { AppOps.InstallBundle(ark, st, zip); } catch (SteamOpen) { open = true; }
+                Check(open && read(cfg) == original && !System.IO.Directory.Exists(plug), "steam: with Steam open and no permission to close it nothing changes");
+                AppOps.Refresh(ark, look);
+                Check(look.Running, "steam: the card sees Steam running (for «Закрыть Steam и …»)");
+                // …закрыть попросили: закрыли, сделали, запустили снова — даже если работа не удалась
+                bool ran = false, started = false;
+                try { started = Steam.Around(true, null, delegate { ran = !Steam.Running(); throw new Exception("work failed"); }); } catch { }
+                Check(ran && Steam.FakeStarts == starts + 1 && Steam.Running(), "steam: closed by us — started again even after a failure");
+                started = Steam.Around(false, null, delegate { });
+                Check(!started && Steam.FakeStarts == starts + 1, "steam: not asked to close — not closed, not started");
+                // …Steam не закрылся — понятная ошибка, работа не начиналась
+                Environment.SetEnvironmentVariable(Steam.TestRunning, "stuck");
+                ran = false;
+                string err = null;
+                try { Steam.Around(true, null, delegate { ran = true; }); } catch (Exception e) { err = e.Message; }
+                Check(!ran && err == Steam.NotClosed && Steam.FakeStarts == starts + 1, "steam: a Steam that does not close stops everything");
+                Environment.SetEnvironmentVariable(Steam.TestRunning, null);
+                // Закрыли и поставили «как по кнопке»
+                Environment.SetEnvironmentVariable(Steam.TestRunning, "1");
+                makeZip(manifestOk);
+                started = Steam.Around(true, null, delegate { AppOps.InstallBundle(ark, st, zip); });
+                Check(started && read(cfg) == installed && Steam.Running(), "steam: «close Steam and install» installs and starts Steam again");
+                Environment.SetEnvironmentVariable(Steam.TestRunning, null);
+                AppOps.Uninstall(ark, new AppStatus { Path = AppOps.Expand(ark.Marker) }, false);
+                Check(read(cfg) == original, "steam: removed again");
+
+                // 6) Нет config.json / битый config.json: файлы стоят, настройки не тронуты, ошибка понятная
+                System.IO.File.Delete(cfg);
+                System.IO.File.Delete(backup);
+                makeZip(manifestOk);
+                err = null;
+                try { AppOps.InstallBundle(ark, st, zip); } catch (Exception e) { err = e.Message; }
+                Check(err == Millennium.EnableFailed && System.IO.File.Exists(System.IO.Path.Combine(plug, "plugin.json")) && !System.IO.File.Exists(cfg) && !System.IO.File.Exists(backup), "steam: no config.json — files in place, says so");
+                AppOps.Uninstall(ark, new AppStatus { Path = AppOps.Expand(ark.Marker) }, false);
+                Check(!System.IO.Directory.Exists(plug) && !System.IO.File.Exists(cfg), "steam: removal without config.json works");
+                byte[] broken = utf.GetBytes("{ \"themes\": { \"activeTheme\": \"Zehn\", }");
+                System.IO.File.WriteAllBytes(cfg, broken);
+                makeZip(manifestOk);
+                err = null;
+                try { AppOps.InstallBundle(ark, st, zip); } catch (Exception e) { err = e.Message; }
+                Check(err == Millennium.EnableFailed && System.IO.File.Exists(System.IO.Path.Combine(theme, "skin.json")) && same(bytes(cfg), broken) && !System.IO.File.Exists(backup), "steam: a broken config.json — files in place, the file untouched");
+                err = null;
+                try { AppOps.Uninstall(ark, new AppStatus { Path = AppOps.Expand(ark.Marker) }, false); } catch (Exception e) { err = e.Message; }
+                Check(err == Millennium.RestoreFailed && !System.IO.Directory.Exists(plug) && same(bytes(cfg), broken), "steam: removal with a broken config.json removes the folders and says the settings were not restored");
+                System.IO.File.WriteAllBytes(cfg, new byte[] { 0xEF, 0xBB, 0xBF, 0x7B, 0x22, 0xFF, 0x22, 0x7D });   // не UTF-8
+                makeZip(manifestOk);
+                err = null;
+                try { AppOps.InstallBundle(ark, st, zip); } catch (Exception e) { err = e.Message; }
+                Check(err == Millennium.EnableFailed && System.IO.File.ReadAllBytes(cfg).Length == 8, "steam: a config.json that is not UTF-8 is not touched");
+                try { AppOps.Uninstall(ark, new AppStatus { Path = AppOps.Expand(ark.Marker) }, false); } catch { }
+                Check(System.IO.File.ReadAllBytes(cfg).Length == 8 && !System.IO.Directory.Exists(plug), "steam: removal leaves a config.json that is not UTF-8 alone");
+
+                // 7) Без манифеста — имена по id; набор поставлен руками (тема уже наша, «как было» не запомнено) — удаление ставит «default»
+                System.IO.File.WriteAllText(cfg, "\uFEFF" + config("arkada", list(new string[] { "arkada", "size-on-disk" })), utf);   // с меткой BOM
+                System.IO.File.Delete(backup);
+                makeZip(null);
+                off = AppOps.InstallBundle(ark, st, zip);
+                Check(off.Count == 0 && read(cfg) == config("arkada", list(new string[] { "arkada", "size-on-disk" })) && bytes(cfg)[0] == (byte)'{', "steam: no manifest — nothing is replaced; a BOM is dropped");
+                Check(Millennium.ReadMemory(plug).Before == null, "steam: our own theme is not remembered as the previous one");
+                AppOps.Uninstall(ark, new AppStatus { Path = AppOps.Expand(ark.Marker) }, false);
+                Check(read(cfg) == config("default", list(new string[] { "size-on-disk" })), "steam: removal without a remembered theme sets «default»");
+
+                // 8) В config.json нет нужных разделов — добавляются в конец тем же отступом; прежняя тема удалена — «default»
+                System.IO.File.WriteAllText(cfg, "{\r\n  \"general\": {\r\n    \"one\": 1\r\n  }\r\n}", utf);
+                makeZip(manifestOk);
+                AppOps.InstallBundle(ark, st, zip);
+                Check(read(cfg) == "{\r\n  \"general\": {\r\n    \"one\": 1\r\n  },\r\n  \"themes\": {\r\n    \"activeTheme\": \"arkada\"\r\n  },\r\n  \"plugins\": {\r\n    \"enabledPlugins\": [\r\n      \"arkada\"\r\n    ]\r\n  }\r\n}", "steam: missing sections are added with the same indentation");
+                AppOps.Uninstall(ark, new AppStatus { Path = AppOps.Expand(ark.Marker) }, false);
+                Check(read(cfg) == "{\r\n  \"general\": {\r\n    \"one\": 1\r\n  },\r\n  \"themes\": {\r\n    \"activeTheme\": \"default\"\r\n  },\r\n  \"plugins\": {\r\n    \"enabledPlugins\": []\r\n  }\r\n}", "steam: an empty plugin list is written as []");
+                System.IO.File.WriteAllText(cfg, original, utf);
+                makeZip(manifestOk);
+                AppOps.InstallBundle(ark, st, zip);
+                System.IO.Directory.Delete(System.IO.Path.Combine(mil, "themes", "Zehn"), true);
+                System.IO.Directory.Delete(System.IO.Path.Combine(mil, "plugins", "steam-share"), true);
+                AppOps.Uninstall(ark, new AppStatus { Path = AppOps.Expand(ark.Marker) }, false);
+                Check(read(cfg) == config("default", list(new string[] { "dotastats", "size-on-disk" })), "steam: a previous theme or plugin that is gone is not brought back");
+
+                // 9) Нет Millennium — карточка это знает (кнопка steambrew.app), ставить отказывается как раньше
+                System.IO.Directory.Delete(mil, true);
+                AppOps.Refresh(ark, look);
+                Check(look.NoHost && !look.Installed, "steam: without Millennium the card knows it");
+                makeZip(manifestOk);
+                err = null;
+                try { AppOps.InstallBundle(ark, st, zip); } catch (Exception e) { err = e.Message; }
+                Check(err == ark.RequiresHint, "steam: without Millennium the install says what is needed");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(Steam.TestDir, null);
+                Environment.SetEnvironmentVariable(Steam.TestRunning, null);
+                try { System.IO.Directory.Delete(tmp, true); } catch { }
+            }
+        }
+
         static byte[] Gzip(byte[] data)
         {
             var ms = new System.IO.MemoryStream();
@@ -665,6 +897,8 @@ namespace DevTxt.Core
             }
 
             DiscordChecks();
+            JsonDocChecks();
+            SteamChecks();
             BlockMapChecks();
 
             // Набор (тема и плагин для Steam): принимается только в папку Steam и раскладывается строго по своим местам

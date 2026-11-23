@@ -26,6 +26,8 @@ namespace DevTxt.Core
         // кончилось последнее «Подключить» или «Отключить», если всё получилось. Running у него — запущен ли Discord
         public bool Lost;
         public string Note;
+        // Набор для Steam: Running — запущен ли Steam; NoHost — нет программы, для которой он (Millennium)
+        public bool NoHost;
 
         // Сколько раз к карточке применяли проверку: фоновая проверка, начатая раньше последней, своё не кладёт
         public int Checks;
@@ -44,14 +46,14 @@ namespace DevTxt.Core
     {
         string path;
         Version version;
-        bool running, lost;
+        bool running, lost, noHost;
         Release latest;
 
-        public static Seen Of(AppStatus s) { return new Seen { path = s.Path, version = s.Version, running = s.Running, lost = s.Lost, latest = s.Latest }; }
+        public static Seen Of(AppStatus s) { return new Seen { path = s.Path, version = s.Version, running = s.Running, lost = s.Lost, noHost = s.NoHost, latest = s.Latest }; }
 
         public bool Same(Seen o)
         {
-            return o != null && string.Equals(path, o.path, StringComparison.OrdinalIgnoreCase) && Equals(version, o.version) && running == o.running && lost == o.lost
+            return o != null && string.Equals(path, o.path, StringComparison.OrdinalIgnoreCase) && Equals(version, o.version) && running == o.running && lost == o.lost && noHost == o.noHost
                 && (latest == o.latest || latest != null && o.latest != null && latest.Version == o.latest.Version && latest.Url == o.latest.Url);
         }
     }
@@ -62,8 +64,8 @@ namespace DevTxt.Core
     {
         public string Path;
         public Version Version;
-        public bool Running, Lost;
-        public bool Procs;       // на процессы смотрели; нет — Running остаётся как был
+        public bool Running, Lost, NoHost;
+        public bool Procs;      // на процессы смотрели; нет — Running остаётся как был
         public string Saved;     // какой запомненный путь видела проверка
         public bool DropSaved;   // запомненный путь — во временной папке: забыть
     }
@@ -203,17 +205,11 @@ namespace DevTxt.Core
 
     static class AppOps
     {
-        static string SteamDir()
-        {
-            try { return (Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", null) as string ?? "").Replace('/', '\\'); }
-            catch { return ""; }
-        }
-
         public static string Expand(string path)
         {
             if (path.Contains("{steam}"))
             {
-                string steam = SteamDir();
+                string steam = Steam.Dir();
                 if (steam == "") return null;
                 path = path.Replace("{steam}", steam);
             }
@@ -433,6 +429,14 @@ namespace DevTxt.Core
             if (!s.Installed) return;
             if (app.IsBundle)
             {
+                // Пока Steam открыт, Millennium при выходе запишет свои настройки поверх наших — не трогаем ничего
+                if (Steam.Running()) throw new SteamOpen();
+                // Сначала настройки Millennium — как было до набора: что запомнили, лежит в папке плагина, она сейчас уйдёт
+                bool restored = true;
+                string steam = Steam.Dir(), marker = Expand(app.Marker);
+                if (steam != "" && marker != null)
+                    try { Millennium.Restore(steam, app.Id, System.IO.Path.GetDirectoryName(marker)); }
+                    catch { restored = false; }
                 // Набор: убираются папки, в которые он раскладывался — они целиком наши
                 foreach (var t in app.Targets)
                     foreach (string to in t.To)
@@ -442,6 +446,7 @@ namespace DevTxt.Core
                         catch { throw new Exception("Не удалось убрать папку — закройте Steam и попробуйте ещё раз"); }
                     }
                 Stash.Clear(app.Id);
+                if (!restored) throw new Exception(Millennium.RestoreFailed);
                 return;
             }
             string path = s.Path;
@@ -590,6 +595,7 @@ namespace DevTxt.Core
             foreach (var app in apps)
             {
                 if (app.IsConnector) names.AddRange(DiscordInstall.ProcessNames);
+                else if (app.IsBundle) names.Add(Steam.Process);   // набор ставится в Steam: на кнопке — закроется ли он
                 else if (!string.IsNullOrEmpty(app.Process)) names.Add(app.Process);
             }
             return names;
@@ -620,9 +626,12 @@ namespace DevTxt.Core
             {
                 string marker = Expand(app.Marker);
                 p.Path = marker != null && File.Exists(marker) ? marker : null;
-                // Какую версию набора ставили — записано рядом; набор, поставленный руками, версии не имеет
-                if (app.IsBundle && p.Path != null)
-                    try { Version v; if (Version.TryParse(File.ReadAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(p.Path), VersionFile)).Trim(), out v)) p.Version = v; } catch { }
+                if (app.IsBundle)
+                {
+                    p.Version = p.Path != null ? BundleVersion(p.Path) : null;
+                    p.Running = Steam.Running(procs);
+                    p.NoHost = !Ready(app);
+                }
                 return p;
             }
             bool running = false;
@@ -655,8 +664,8 @@ namespace DevTxt.Core
             {
                 s.Path = p.Path;
                 s.Version = p.Version;
-                if (app.IsBundle) s.Running = false;
-                else if (p.Procs) s.Running = p.Running;
+                if (app.IsBundle) s.NoHost = p.NoHost;
+                if (p.Procs) s.Running = p.Running;   // у набора — запущен ли Steam
                 if (!app.IsBundle)
                 {
                     // Запомненное меняем, только если с начала проверки его никто не поменял
@@ -692,6 +701,26 @@ namespace DevTxt.Core
         }
 
         const string VersionFile = ".core-version";
+
+        // Какую версию набора ставили — записано рядом с отметкой. Нет записи (набор поставлен руками) — версия из самой
+        // отметки, если это plugin.json с полем "version": тогда и такой набор узнает о своём обновлении
+        public static Version BundleVersion(string marker)
+        {
+            Version v;
+            try
+            {
+                string f = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(marker), VersionFile);
+                if (File.Exists(f)) return Version.TryParse(File.ReadAllText(f).Trim(), out v) ? v : null;
+            }
+            catch { return null; }
+            try
+            {
+                if (!marker.EndsWith(".json", StringComparison.OrdinalIgnoreCase) || new FileInfo(marker).Length > 256 * 1024) return null;
+                string text = Json.Str(Json.Parse(File.ReadAllText(marker, System.Text.Encoding.UTF8)), "version");
+                return text != null && Version.TryParse(text.Trim(), out v) ? v : null;
+            }
+            catch { return null; }
+        }
 
         // Куда класть часть набора: первое из мест, у которого уже есть родительская папка; иначе просто первое
         public static string PickTarget(BundleTarget t)
@@ -744,26 +773,36 @@ namespace DevTxt.Core
             return need != null && Directory.Exists(need);
         }
 
+        // Набор: разложить файлы, записать версию и включить тему и плагин в Millennium. Возвращает, какие плагины
+        // отключены как заменённые. Файлы легли, а настройки не вышли — исключение с Millennium.EnableFailed
+        public static List<string> InstallBundle(AppEntry app, AppStatus s, string file)
+        {
+            string need = app.Requires != null ? Expand(app.Requires) : null;
+            if (app.Requires != null && (need == null || !Directory.Exists(need))) throw new Exception(string.IsNullOrEmpty(app.RequiresHint) ? "Не найдена программа, для которой это дополнение" : app.RequiresHint);
+            // Пока Steam открыт, файлы могут быть заняты, а Millennium при выходе запишет свои настройки поверх наших
+            if (Steam.Running()) throw new SteamOpen();
+            var parts = new List<KeyValuePair<string, string>>();
+            foreach (var t in app.Targets)
+            {
+                string dest = PickTarget(t);
+                if (dest == null) throw new Exception(string.IsNullOrEmpty(app.RequiresHint) ? "Не найдена папка Steam" : app.RequiresHint);
+                parts.Add(new KeyValuePair<string, string>(t.From, dest));
+            }
+            BundleNames names = BundleNames.FromZip(file, app.Id);
+            ExtractBundle(file, parts);
+            string marker = Expand(app.Marker);
+            if (marker != null && File.Exists(marker) && s.Latest != null)
+                File.WriteAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(marker), VersionFile), s.Latest.Version.ToString());
+            if (!Stash.Holds(file)) Releases.TryDelete(file);   // файл из запаса нужен следующему обновлению
+            string steam = Steam.Dir();
+            if (steam == "" || marker == null || !File.Exists(marker)) throw new Exception(Millennium.EnableFailed);
+            try { return Millennium.Enable(steam, app.Id, names, System.IO.Path.GetDirectoryName(marker)); }
+            catch (Exception e) { throw new Exception(Millennium.EnableFailed, e); }
+        }
+
         public static void Install(AppEntry app, AppStatus s, string file)
         {
-            if (app.IsBundle)
-            {
-                string need = app.Requires != null ? Expand(app.Requires) : null;
-                if (app.Requires != null && (need == null || !Directory.Exists(need))) throw new Exception(string.IsNullOrEmpty(app.RequiresHint) ? "Не найдена программа, для которой это дополнение" : app.RequiresHint);
-                var parts = new List<KeyValuePair<string, string>>();
-                foreach (var t in app.Targets)
-                {
-                    string dest = PickTarget(t);
-                    if (dest == null) throw new Exception(string.IsNullOrEmpty(app.RequiresHint) ? "Не найдена папка Steam" : app.RequiresHint);
-                    parts.Add(new KeyValuePair<string, string>(t.From, dest));
-                }
-                ExtractBundle(file, parts);
-                string marker = Expand(app.Marker);
-                if (marker != null && File.Exists(marker) && s.Latest != null)
-                    File.WriteAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(marker), VersionFile), s.Latest.Version.ToString());
-                if (!Stash.Holds(file)) Releases.TryDelete(file);   // файл из запаса нужен следующему обновлению
-                return;
-            }
+            if (app.IsBundle) { InstallBundle(app, s, file); return; }
             if (app.Kind == "installer")
             {
                 // Установщик сам закрывает приложение и кладёт файлы на место; «тихий» ключ — без окон

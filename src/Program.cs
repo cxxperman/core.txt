@@ -688,9 +688,33 @@ namespace DevTxt.Core
             finally { AppOps.HomeOverride = null; try { System.IO.Directory.Delete(tmp, true); } catch { } }
         }
 
+        // Движение без окна (как на снимке): бегущая полоса стоит отрезком, а не залита целиком; бесконечное движение
+        // помнит, что должно идти, но не идёт, и смена «Меньше движения» его не запускает. С окном — в --motion.
+        static void MotionChecks()
+        {
+            var bar = new Progress(System.Windows.Media.Colors.Orange);
+            bar.Root.Measure(new Size(300, 3));
+            bar.Root.Arrange(new Rect(0, 0, 300, 3));
+            bar.Busy = true;
+            var fill = (System.Windows.Controls.Border)((System.Windows.Controls.Grid)bar.Root.Child).Children[1];
+            Check(fill.Width > 0 && fill.Width < 150, "a busy bar that cannot move is a segment, not a full bar (width " + fill.Width + ")");
+            Check(Motion.Wants(bar.Root) && !Motion.Looping(bar.Root), "a busy bar off screen wants to run but does not");
+            Ui.ForceReducedMotion = true;
+            Ui.ForceReducedMotion = false;
+            Check(Motion.Wants(bar.Root) && !Motion.Looping(bar.Root), "switching reduced motion does not start a loop off screen");
+            bar.Busy = false;
+            Check(!Motion.Wants(bar.Root) && fill.Width == 0, "an idle bar is empty again");
+            var dot = new System.Windows.Shapes.Ellipse();
+            Motion.Blink(dot, true);
+            Check(Motion.Wants(dot) && !Motion.Looping(dot) && dot.Opacity == 1, "a blink off screen stays still");
+            Motion.Blink(dot, false);
+            Check(!Motion.Wants(dot), "a blink switched off is forgotten");
+        }
+
         static void Checks()
         {
             Check(State.FilePath.StartsWith(System.IO.Path.GetTempPath(), StringComparison.OrdinalIgnoreCase), "the self-test keeps its state in a temporary folder");
+            MotionChecks();
             var apps = Catalog.Read(@"{ ""apps"": [
                 { ""id"": ""one"", ""name"": ""One"", ""kind"": ""portable"", ""repo"": ""cxxperman/one"", ""asset"": ""One.exe"", ""exe"": ""One.exe"", ""process"": ""One"", ""color"": ""#F08A4B"" },
                 { ""id"": ""two"", ""name"": ""Two"", ""kind"": ""installer"", ""repo"": ""cxxperman/two"", ""asset"": ""Two-Setup-*.exe"", ""installed"": ""%TEMP%\\two.exe"" },

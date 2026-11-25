@@ -39,6 +39,10 @@ namespace DevTxt.Core
         // Что было в прошлый раз — чтобы отметить движением то, что изменилось
         bool drawn, wasBusy, wasInstalled;
         string wasError;
+        // Следующая перерисовка — без хлопка о том, что программа нашлась: её нашла первая фоновая проверка после
+        // запуска окна (по запущенному процессу), а не человек её только что поставил
+        bool quiet;
+        public void Quiet() { quiet = true; }
 
         public Card(AppEntry app) : this(app, null) { }
 
@@ -308,9 +312,9 @@ namespace DevTxt.Core
                     if (error == null) { Motion.Pop(tile); Motion.Glow(Root, S.Installed ? App.Color : (Ui.Light ? Tokens.Light.Label3 : Tokens.Dark.Label3)); }   // audit:ok — цвет выбран по теме
                 }
                 if (error != null && error != wasError) Motion.Shake(Root);
-                else if (!busy && !wasBusy && S.Installed != wasInstalled) Motion.Pop(tile);
+                else if (!busy && !wasBusy && S.Installed != wasInstalled && !quiet) Motion.Pop(tile);
             }
-            drawn = true; wasBusy = busy; wasInstalled = S.Installed; wasError = error;
+            drawn = true; wasBusy = busy; wasInstalled = S.Installed; wasError = error; quiet = false;
         }
     }
 

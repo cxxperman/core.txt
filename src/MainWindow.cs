@@ -917,7 +917,7 @@ namespace DevTxt.Core
                 Card c = batch[i];
                 // Пока шла проверка, с карточкой что-то делали (установка, удаление) или её уже проверили заново — ответ устарел
                 if (found[i] == null || c.S.Phase != Phase.Idle || c.S.Checks != checks[i] || !Cards.Contains(c)) continue;
-                if (AppOps.Apply(c.App, c.S, found[i])) { changed = true; InstalledApps.Sync(c.App, c.S); }
+                if (AppOps.Apply(c.App, c.S, found[i])) { changed = true; InstalledApps.Sync(c.App, c.S); if (always) c.Quiet(); }   // первый проход после запуска — не событие для человека
             }
             if (changed && (page == PApps || launching)) RenderAll();
         }
@@ -1335,6 +1335,14 @@ namespace DevTxt.Core
                 });
             };
             Card aura = Find("aura"), dockCard = Find("dock"), arkada = Find("arkada");
+            // Проверки состояния движения — того, что на кадре не видно. Не прошла — исключение, и --motion выходит с кодом 1
+            Action<bool, string> expect = delegate(bool ok, string what) { if (!ok) throw new InvalidOperationException("motion check failed: " + what); };
+            Func<FrameworkElement> welcomeMark = delegate { return Seek<Viewbox>(welcome.Root, delegate(Viewbox v) { return v.Width == 132; }); };
+            Func<Card, Border> barOf = delegate(Card c) { return Seek<Border>(c.Root, delegate(Border b) { return b.Height == 3 && b.ClipToBounds && b.Child is Grid; }); };
+            Func<Card, Border> tileOf = delegate(Card c) { return Seek<Border>(c.Root, delegate(Border b) { return b.Width == 52; }); };
+            Func<Card, UIElement> dotOf = delegate(Card c) { return Seek<System.Windows.Shapes.Ellipse>(c.Root, delegate(System.Windows.Shapes.Ellipse e) { return e.Width == 7; }); };
+            Func<Border> pillNow = delegate { return Seek<Border>(shell.Root, delegate(Border b) { return b.Width == 3 && b.Height == 16 && b.Visibility == Visibility.Visible; }); };
+            Func<Border, bool> popping = delegate(Border b) { var s = b != null ? b.RenderTransform as ScaleTransform : null; return s != null && s.HasAnimatedProperties; };
 
             // Установщик: шаги
             at(0, delegate { foreach (var c in Cards) if (c.App.Id == "aura" || c.App.Id == "dock") { c.S.Path = null; c.S.Running = false; } welcome.SetStep(0); ShowPage(PWelcome); });
@@ -1344,12 +1352,13 @@ namespace DevTxt.Core
             // Установщик: ход
             at(0, delegate { welcome.ShowProgress(new List<string> { "kapsula", "aura", "dock" }, true, false); aura.S.Phase = Phase.Downloading; aura.S.Progress = 0.08; RenderAll(); });
             grab(140, "run-in"); grab(700, "run");
-            at(0, delegate { aura.S.Progress = 0.7; RenderAll(); });
+            at(0, delegate { expect(Motion.Looping(welcomeMark()), "the installer mark breathes while the install runs"); aura.S.Progress = 0.7; RenderAll(); });
             grab(110, "run-bar-moving"); grab(500, "run-bar");
             at(0, delegate { aura.S.Phase = Phase.Installing; dockCard.S.Phase = Phase.Downloading; dockCard.S.Progress = 0.4; RenderAll(); });
             grab(450, "run-installing");
             at(0, delegate { aura.S.Phase = Phase.Idle; aura.S.Path = "demo"; dockCard.S.Phase = Phase.Idle; dockCard.S.Error = "Нет связи с GitHub"; RenderAll(); });
             grab(120, "run-done-moving"); grab(1300, "run-done");
+            at(0, delegate { FrameworkElement m = welcomeMark(); expect(!Motion.Wants(m) && !Motion.Looping(m) && m.Opacity == 1, "the installer mark stops breathing once everything is done"); });
             // Окно приложений: вход, установка на карточке, ошибка, успех
             at(0, delegate { dockCard.S.Error = null; LeaveWelcome(); });
             grab(140, "apps-in"); grab(900, "apps");
@@ -1365,10 +1374,65 @@ namespace DevTxt.Core
             // Вопрос об удалении и вкладки
             at(0, delegate { aura.AskRemove(); RenderAll(); });
             grab(120, "remove-ask-in"); grab(500, "remove-ask");
-            at(0, delegate { ShowPage(PSettings); Animate(); });
+            // Разделы — тем же путём, что щелчок слева (Go: ещё и вход страницы снизу)
+            at(0, delegate { Go("general"); expect(popping(pillNow()), "picking another section pops its pill"); });
             grab(120, "tab-moving"); grab(800, "tab");
-            at(0, delegate { ShowPage(PApps); Animate(); });
+            at(0, delegate { Go("apps"); });
             grab(700, "back");
+            // Список разделов собран заново (поставили или удалили приложение), выбран тот же раздел — полоска не хлопает
+            at(0, delegate { navSig = null; RenderAll(); expect(pillNow() != null && !popping(pillNow()), "rebuilding the section list does not pop the selected pill"); });
+            // Входы отпускают свойства: после смены надписи кнопка снова приглушает текст при нажатии
+            at(0, delegate
+            {
+                // Отпущенная анимация остаётся при свойстве остановленной: судим по тому, видна ли запись в свойство
+                var label = (TextBlock)arkada.Main.Root.Child;
+                var shift = label.RenderTransform as TranslateTransform;
+                label.Opacity = 0.786;
+                expect(label.Opacity == 0.786, "a pressed button can dim its label after a swap");
+                label.Opacity = 1;
+                if (shift != null) { shift.Y = 2; expect(shift.Y == 2, "a swapped label lets go of its shift"); shift.Y = 0; }
+                arkada.Root.Opacity = 0.5; appsView.Opacity = 0.5;
+                expect(arkada.Root.Opacity == 0.5 && appsView.Opacity == 0.5, "the stagger and the page entrance let go of opacity");
+                arkada.Root.Opacity = 1; appsView.Opacity = 1;
+            });
+            // Две вспышки рамки подряд: рамка возвращается к своей кисти, а не к цвету первой вспышки
+            at(0, delegate { Motion.Glow(arkada.Root, Tokens.Palette.Red); Motion.Glow(arkada.Root, Tokens.Palette.Green); });
+            at(Tokens.Motion.RevealMs * 2 + 300, delegate { expect(arkada.Root.BorderBrush == Ui.Rim, "two glows in a row hand the rim back"); });
+
+            // «Меньше движения» включено во время работы: полоса — неподвижный отрезок, значок и точка не дышат
+            at(0, delegate { Ui.ForceReducedMotion = true; arkada.S.Phase = Phase.Installing; RenderAll(); });
+            grab(300, "reduced-installing");
+            at(0, delegate
+            {
+                Border bar = barOf(arkada), fill = (Border)((Grid)bar.Child).Children[1];
+                expect(Motion.Wants(bar) && !Motion.Looping(bar), "with reduced motion the busy bar stands still");
+                expect(fill.Width > 0 && fill.Width < bar.ActualWidth * 0.5, "a still busy bar is a segment, not a full bar");
+                expect(Motion.Wants(tileOf(arkada)) && !Motion.Looping(tileOf(arkada)) && tileOf(arkada).Opacity == 1, "with reduced motion the tile does not breathe");
+                // Выключили посреди работы — движение идёт снова, не дожидаясь новой работы
+                Ui.ForceReducedMotion = false;
+                expect(Motion.Looping(bar) && Motion.Looping(tileOf(arkada)) && Motion.Looping(dotOf(arkada)), "turning reduced motion off mid-work resumes the loops");
+            });
+            grab(200, "reduced-off-moving");
+            at(0, delegate
+            {
+                Ui.ForceReducedMotion = true;
+                expect(!Motion.Looping(barOf(arkada)) && !Motion.Looping(tileOf(arkada)) && !Motion.Looping(dotOf(arkada)), "turning reduced motion on mid-work stops the loops");
+                expect(tileOf(arkada).Opacity == 1 && dotOf(arkada).Opacity == 1, "stopped loops leave the tile and the dot fully drawn");
+                Ui.ForceReducedMotion = false;
+            });
+            // Окно ушло в трей: бесконечное движение встаёт; работа, начатая при спрятанном окне, задвигается при показе
+            at(0, delegate { Hide(); });
+            at(150, delegate
+            {
+                expect(!Motion.Looping(barOf(arkada)) && !Motion.Looping(tileOf(arkada)), "a hidden window stops the loops");
+                arkada.S.Phase = Phase.Idle; RenderAll();
+                arkada.S.Phase = Phase.Installing; RenderAll();
+                expect(Motion.Wants(tileOf(arkada)) && !Motion.Looping(tileOf(arkada)), "work begun while hidden waits for the window");
+                Show();
+            });
+            at(150, delegate { expect(Motion.Looping(barOf(arkada)) && Motion.Looping(tileOf(arkada)) && Motion.Looping(dotOf(arkada)), "shown again, the loops run"); });
+            at(0, delegate { arkada.S.Phase = Phase.Idle; RenderAll(); expect(!Motion.Wants(tileOf(arkada)) && !Motion.Wants(barOf(arkada)) && tileOf(arkada).Opacity == 1, "finished work ends the loops"); });
+            grab(1300, "after-checks");
             at(0, done);
 
             int i = 0;
@@ -1382,6 +1446,20 @@ namespace DevTxt.Core
             };
             timer.Interval = TimeSpan.FromMilliseconds(400);
             timer.Start();
+        }
+
+        // Для проверки движения: первый элемент такого вида в дереве окна
+        static T Seek<T>(DependencyObject root, Predicate<T> pick) where T : DependencyObject
+        {
+            if (root == null) return null;
+            var hit = root as T;
+            if (hit != null && pick(hit)) return hit;
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            {
+                T found = Seek<T>(VisualTreeHelper.GetChild(root, i), pick);
+                if (found != null) return found;
+            }
+            return null;
         }
 
         // Снимок общего меню значка в трее — те же пункты, что по правому щелчку, только без окна на экране

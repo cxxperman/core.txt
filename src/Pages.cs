@@ -540,7 +540,7 @@ namespace DevTxt.Core
             if (step == 2 && working != busy)
             {
                 if (busy) Motion.Breathe(mark, true);
-                else if (working == true) Motion.Pop(mark);
+                else if (working == true) { Motion.Breathe(mark, false); Motion.Pop(mark); }   // всё встало — значок перестаёт «дышать»
                 working = busy;
             }
 
